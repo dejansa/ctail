@@ -38,6 +38,7 @@ class ColorRule:
     source_index: int | None = None
     name: str | None = None
     group_colors: tuple[str, ...] = ()
+    profile_name: str | None = None
 
 
 DEFAULT_RULES = (
@@ -99,7 +100,11 @@ def _split_colors(value: str) -> tuple[str, ...]:
 
 
 def _parse_rules(
-    data: Any, source: Path, *, allow_builtins: bool = False
+    data: Any,
+    source: Path,
+    *,
+    allow_builtins: bool = False,
+    profile_name: str | None = None,
 ) -> list[ColorRule]:
     if not isinstance(data, list):
         raise TypeError(f"{source}: 'rules' must be an array of tables")
@@ -167,8 +172,33 @@ def _parse_rules(
         parsed.append(ColorRule(
             pattern, color, compiled, regex_enabled,
             "built-in" if builtin else str(source), disabled, index - 1,
-            name=name, group_colors=group_colors,
+            name=name, group_colors=group_colors, profile_name=profile_name,
         ))
+    return parsed
+
+
+def _parse_rule_profiles(
+    data: dict[str, Any],
+    source: Path,
+    *,
+    allow_builtins: bool = False,
+) -> dict[str, list[ColorRule]]:
+    profiles = data.get("profiles", {})
+    if not isinstance(profiles, dict):
+        raise TypeError(f"{source}: 'profiles' must be a table")
+
+    parsed: dict[str, list[ColorRule]] = {}
+    for name, profile in profiles.items():
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"{source}: profile names must be non-empty strings")
+        if not isinstance(profile, dict):
+            raise TypeError(f"{source}: profile {name!r} must be a table")
+        parsed[name] = _parse_rules(
+            profile.get("rules", []),
+            source,
+            allow_builtins=allow_builtins,
+            profile_name=name,
+        )
     return parsed
 
 
@@ -183,11 +213,14 @@ def _read_toml(path: Path) -> dict[str, Any]:
     return data
 
 
-def _load_settings(config_dir: Path) -> tuple[bool, list[ColorRule], Path]:
+def _load_settings(
+    config_dir: Path, profile: str | None = None
+) -> tuple[bool, list[ColorRule], Path]:
     config_path = config_dir / "ctail.toml"
     rules_path = config_dir / "rules.toml"
     show_unmatched = False
     configured_rules: list[ColorRule] = []
+    configured_profiles: dict[str, list[ColorRule]] = {}
 
     if config_path.exists():
         config = _read_toml(config_path)
@@ -197,10 +230,32 @@ def _load_settings(config_dir: Path) -> tuple[bool, list[ColorRule], Path]:
         configured_rules = _parse_rules(
             config.get("rules", []), config_path, allow_builtins=True
         )
+        configured_profiles = _parse_rule_profiles(
+            config, config_path, allow_builtins=True
+        )
 
     ad_hoc_rules: list[ColorRule] = []
+    profile_ad_hoc_rules: dict[str, list[ColorRule]] = {}
     if rules_path.exists():
-        ad_hoc_rules = _parse_rules(_read_toml(rules_path).get("rules", []), rules_path)
+        rules_data = _read_toml(rules_path)
+        ad_hoc_rules = _parse_rules(rules_data.get("rules", []), rules_path)
+        profile_ad_hoc_rules = _parse_rule_profiles(rules_data, rules_path)
+        unknown_profiles = sorted(set(profile_ad_hoc_rules) - set(configured_profiles))
+        if unknown_profiles:
+            names = ", ".join(repr(name) for name in unknown_profiles)
+            raise ValueError(
+                f"{rules_path}: temporary rules reference profiles not defined "
+                f"in {config_path}: {names}"
+            )
+
+    if profile is not None:
+        if profile not in configured_profiles:
+            available = ", ".join(sorted(configured_profiles)) or "none"
+            raise ValueError(
+                f"{config_path}: unknown profile {profile!r}; "
+                f"available profiles: {available}"
+            )
+        configured_rules = configured_profiles[profile]
 
     overrides: dict[str, ColorRule] = {}
     for rule in configured_rules:
@@ -213,7 +268,23 @@ def _load_settings(config_dir: Path) -> tuple[bool, list[ColorRule], Path]:
         overrides.get(pattern, ColorRule(pattern, color, re.compile(pattern)))
         for pattern, color in DEFAULT_RULES
     ]
-    return show_unmatched, ad_hoc_rules + configured_rules + defaults, rules_path
+    scoped_ad_hoc_rules = profile_ad_hoc_rules.get(profile, []) if profile else []
+    return (
+        show_unmatched,
+        ad_hoc_rules + scoped_ad_hoc_rules + configured_rules + defaults,
+        rules_path,
+    )
+
+
+def _list_profiles(console: Console, config_path: Path) -> None:
+    config = _read_toml(config_path) if config_path.exists() else {}
+    profiles = _parse_rule_profiles(config, config_path, allow_builtins=True)
+    if not profiles:
+        console.print("No named profiles configured.")
+        return
+    console.print("Configured profiles:")
+    for name in sorted(profiles):
+        console.print(f"  {name}")
 
 
 def _list_colors(console: Console) -> None:
@@ -231,9 +302,12 @@ def _show_rules(console: Console, rules: list[ColorRule]) -> None:
     for heading in ("Priority", "Source", "Status", "Mode", "Name", "Pattern", "Style"):
         table.add_column(heading)
     for priority, rule in enumerate(rules, start=1):
+        source = rule.source
+        if rule.profile_name is not None:
+            source = f"{source} (profile: {rule.profile_name})"
         table.add_row(
             str(priority),
-            Text(rule.source),
+            Text(source),
             "disabled" if rule.disabled else "enabled",
             "regex" if rule.regex_enabled else "literal",
             rule.name or "-",
@@ -295,7 +369,12 @@ def _render_line(line: str, rules: list[ColorRule], show_unmatched: bool) -> Tex
     return rendered
 
 
-def _read_rule_document(path: Path) -> tuple[TOMLDocument, AoT | Array]:
+def _read_rule_document(
+    path: Path,
+    profile_name: str | None = None,
+    *,
+    create_profile: bool = False,
+) -> tuple[TOMLDocument, AoT | Array]:
     if path.exists():
         try:
             document = tomlkit.parse(path.read_text(encoding="utf-8"))
@@ -303,15 +382,34 @@ def _read_rule_document(path: Path) -> tuple[TOMLDocument, AoT | Array]:
             raise ValueError(f"{path}: invalid TOML: {error}") from error
     else:
         document = tomlkit.document()
+    data = document.unwrap()
     _parse_rules(
-        document.unwrap().get("rules", []), path,
+        data.get("rules", []), path,
         allow_builtins=path.name == "ctail.toml",
     )
-    if "rules" not in document:
-        document["rules"] = tomlkit.aot()
-    entries = document["rules"]
+    _parse_rule_profiles(
+        data, path, allow_builtins=path.name == "ctail.toml"
+    )
+    if profile_name is None:
+        if "rules" not in document:
+            document["rules"] = tomlkit.aot()
+        entries = document["rules"]
+    else:
+        profiles = document.get("profiles")
+        if profiles is None and create_profile:
+            document["profiles"] = tomlkit.table()
+            profiles = document["profiles"]
+        if profiles is None or profile_name not in profiles:
+            if not create_profile:
+                raise ValueError(f"{path}: profile {profile_name!r} no longer exists")
+            profiles[profile_name] = tomlkit.table()
+        profile = profiles[profile_name]
+        if "rules" not in profile:
+            profile["rules"] = tomlkit.aot()
+        entries = profile["rules"]
     if not isinstance(entries, (AoT, Array)):
-        raise TypeError(f"{path}: 'rules' must be an array of tables")
+        section = f"profile {profile_name!r} " if profile_name is not None else ""
+        raise TypeError(f"{path}: {section}'rules' must be an array of tables")
     return document, entries
 
 
@@ -319,6 +417,9 @@ def _save_rule_document(path: Path, document: TOMLDocument) -> None:
     _parse_rules(
         document.unwrap().get("rules", []), path,
         allow_builtins=path.name == "ctail.toml",
+    )
+    _parse_rule_profiles(
+        document.unwrap(), path, allow_builtins=path.name == "ctail.toml"
     )
     path = path.resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -339,22 +440,35 @@ def _save_rule_document(path: Path, document: TOMLDocument) -> None:
             temporary_path.unlink(missing_ok=True)
 
 
-def _write_ad_hoc_rule(path: Path, pattern: str, color: str) -> None:
-    document, entries = _read_rule_document(path)
+def _write_ad_hoc_rule(
+    path: Path,
+    pattern: str,
+    color: str,
+    profile_name: str | None = None,
+) -> None:
+    document, entries = _read_rule_document(
+        path, profile_name, create_profile=profile_name is not None
+    )
     entry = tomlkit.inline_table() if isinstance(entries, Array) else tomlkit.table()
     entry.update({"pattern": pattern, "color": color, "regex": False, "disabled": False})
     entries.insert(0, entry)
     _save_rule_document(path, document)
 
 
-def _change_rule(rule: ColorRule, rules_path: Path, *, delete: bool) -> None:
+def _change_rule(
+    rule: ColorRule,
+    rules_path: Path,
+    *,
+    delete: bool,
+    profile: str | None = None,
+) -> None:
     if delete and rule.source == "built-in":
         raise ValueError("Built-in rules cannot be deleted; disable them instead.")
-    _, current_rules, _ = _load_settings(rules_path.parent)
+    _, current_rules, _ = _load_settings(rules_path.parent, profile)
     if rule not in current_rules:
         raise ValueError("Rules changed on disk; restart ctail before editing this rule.")
     path = rules_path.with_name("ctail.toml") if rule.source == "built-in" else Path(rule.source)
-    document, entries = _read_rule_document(path)
+    document, entries = _read_rule_document(path, rule.profile_name)
     if rule.source_index is None:
         if rule.source != "built-in":
             raise ValueError("Rule has no saved TOML entry.")
@@ -376,6 +490,7 @@ def _add_rule(
     rules_path: Path,
     keyboard_fd: int,
     original_terminal: list[Any],
+    profile: str | None = None,
 ) -> None:
     termios.tcsetattr(keyboard_fd, termios.TCSADRAIN, original_terminal)
     try:
@@ -389,8 +504,8 @@ def _add_rule(
             return
         try:
             Style.parse(color)
-            _write_ad_hoc_rule(rules_path, pattern, color)
-            _, loaded_rules, _ = _load_settings(rules_path.parent)
+            _write_ad_hoc_rule(rules_path, pattern, color, profile)
+            _, loaded_rules, _ = _load_settings(rules_path.parent, profile)
         except (ColorParseError, StyleSyntaxError, OSError, TypeError, ValueError) as error:
             console.print(f"Could not add color rule: {error}", style="bold red")
             return
@@ -444,6 +559,8 @@ def _select_rule(
         for index in range(start, min(start + page_size, len(choices))):
             rule = choices[index]
             source = "built-in" if rule.source == "built-in" else Path(rule.source).name
+            if rule.profile_name is not None:
+                source = f"{source} ({rule.profile_name})"
             row = Text(
                 f"{'> ' if index == selected else '  '}"
                 f"[{'disabled' if rule.disabled else 'enabled'}] {source} "
@@ -483,15 +600,15 @@ def _select_rule(
 
 def _manage_rules(
     console: Console, rules: list[ColorRule], rules_path: Path,
-    keyboard_fd: int, *, delete: bool,
+    keyboard_fd: int, *, delete: bool, profile: str | None = None,
 ) -> None:
     rule = _select_rule(console, rules, keyboard_fd, delete=delete)
     if rule is None:
         console.print("Canceled.", style="dim")
         return
     try:
-        _change_rule(rule, rules_path, delete=delete)
-        _, loaded_rules, _ = _load_settings(rules_path.parent)
+        _change_rule(rule, rules_path, delete=delete, profile=profile)
+        _, loaded_rules, _ = _load_settings(rules_path.parent, profile)
     except (OSError, TypeError, ValueError) as error:
         console.print(Text(f"Could not change color rule: {error}", style="bold red"))
         return
@@ -531,6 +648,7 @@ def _consume_stream(
     keyboard_fd: int | None = None,
     rules_path: Path | None = None,
     original_terminal: list[Any] | None = None,
+    profile: str | None = None,
 ) -> bool:
     buffer = bytearray()
     paused = False
@@ -553,10 +671,13 @@ def _consume_stream(
                 state = "shown" if show_unmatched else "hidden"
                 console.print(f"Unmatched lines {state}.", style="dim")
             elif key in (b"c", b"C") and rules_path is not None and original_terminal is not None:
-                _add_rule(console, rules, rules_path, keyboard_fd, original_terminal)
+                _add_rule(
+                    console, rules, rules_path, keyboard_fd, original_terminal, profile
+                )
             elif key in (b"r", b"R", b"d", b"D") and rules_path is not None:
                 _manage_rules(
-                    console, rules, rules_path, keyboard_fd, delete=key in (b"r", b"R")
+                    console, rules, rules_path, keyboard_fd,
+                    delete=key in (b"r", b"R"), profile=profile,
                 )
             elif key == b"?":
                 _show_interactive_help(console, keyboard_fd)
@@ -704,6 +825,11 @@ def main() -> None:
         help="disable colored output",
     )
     parser.add_argument(
+        "-p", "--profile",
+        metavar="NAME",
+        help="use a named coloring-rule profile from ctail.toml",
+    )
+    parser.add_argument(
         "-l", "--less",
         action="store_true",
         help="show the full file in less instead of tailing it",
@@ -712,6 +838,11 @@ def main() -> None:
         "-lsc", "--list-colors",
         action="store_true",
         help="list available named colors and exit",
+    )
+    parser.add_argument(
+        "-lsp", "--list-profiles",
+        action="store_true",
+        help="list configured coloring-rule profiles and exit",
     )
     parser.add_argument(
         "-shr", "--show-rules",
@@ -731,9 +862,13 @@ def main() -> None:
         _initialize_config(config_dir)
         if options.list_colors:
             _list_colors(console)
+            if not options.show_rules and not options.list_profiles:
+                return
+        if options.list_profiles:
+            _list_profiles(console, config_dir / "ctail.toml")
             if not options.show_rules:
                 return
-        show_unmatched, rules, rules_path = _load_settings(config_dir)
+        show_unmatched, rules, rules_path = _load_settings(config_dir, options.profile)
         if options.show_rules:
             _show_rules(console, rules)
             return
@@ -767,6 +902,7 @@ def main() -> None:
             keyboard_fd,
             rules_path if keyboard_fd is not None else None,
             original_terminal,
+            options.profile,
         )
     except (OSError, RuntimeError, TypeError, ValueError, tomllib.TOMLDecodeError) as error:
         parser.exit(2, f"ctail: error: {error}\n")

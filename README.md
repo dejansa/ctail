@@ -43,6 +43,13 @@ earlier rules take precedence when matches overlap. Unmatched lines are hidden
 by default, as in the original Bash script. Set `show_unmatched = true` to
 display them.
 
+Use `--profile NAME` (or `-p NAME`) to select a named set of rules for a
+particular log format. Define profiles in `~/.config/ctail/ctail.toml`; without
+the option, the top-level rules in that file are used. Selecting a profile
+replaces those top-level rules. Built-in rules and top-level rules in
+`rules.toml` remain active. Temporary rules can also be grouped under matching
+`[profiles.NAME]` sections in `rules.toml`.
+
 ```toml
 show_unmatched = true
 
@@ -60,6 +67,13 @@ color = "bold bright_red"
 name = "Debug messages"
 pattern = '(?i)\[debug\]'
 color = "bright_green"
+
+[profiles.http-access]
+
+[[profiles.http-access.rules]]
+name = "HTTP request method"
+pattern = '\b(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\b'
+color = "bright_cyan"
 ```
 
 `name` is an optional descriptive label for a rule. It is shown with the
@@ -94,8 +108,9 @@ literal text/color rule, **r** to remove a custom rule, **d** to enable/disable
 any rule, **?** to show the interactive command list, or **q** to quit. The
 **f** toggle applies only to the current run; it does not change
 `ctail.toml`. The help panel closes when any key is pressed. Rules created
-with **c** are saved separately in
-`~/.config/ctail/rules.toml`, and take precedence over the main configuration.
+with **c** are saved in `~/.config/ctail/rules.toml`. With no active profile
+they are shared; when a profile is active they are saved to that profile and
+apply only to it.
 Use `--no-color` to disable colored output.
 
 ## Listing colors and rules
@@ -103,6 +118,7 @@ Use `--no-color` to disable colored output.
 ```sh
 ctail -lsc                 # or --list-colors
 ctail -shr                 # or --show-rules
+ctail -lsp                 # or --list-profiles
 ctail -lsc -shr            # show both and exit
 ctail --show-rules --no-color
 ```
@@ -111,14 +127,18 @@ ctail --show-rules --no-color
 of foreground/background styles and custom color syntax. It does not require
 valid configuration files.
 
-`--show-rules` lists all loaded rules in priority order: ad-hoc rules from
-`~/.config/ctail/rules.toml`, user rules from `~/.config/ctail/ctail.toml`,
-then built-in rules. Each entry shows its source, enabled/disabled status,
-regex/literal mode, optional name, pattern, and style rendered in its configured
-colors.
+`--list-profiles` prints the named profiles configured in
+`~/.config/ctail/ctail.toml`. It accepts the short alias `-lsp`.
 
-Both commands exit without reading stdin or starting `tail`. Colors are shown
-in a terminal; redirected output and `--no-color` produce plain text.
+`--show-rules` lists all loaded rules in priority order: ad-hoc rules from
+`~/.config/ctail/rules.toml`, profile-specific temporary rules when a profile is
+selected, rules from that profile (or, by default, the top-level rules in
+`~/.config/ctail/ctail.toml`), then built-in rules. Each entry shows its source,
+enabled/disabled status, regex/literal mode, optional name, pattern, and style
+rendered in its configured colors.
+
+These listing commands exit without reading stdin or starting `tail`. Colors
+are shown in a terminal; redirected output and `--no-color` produce plain text.
 
 ## Removing and disabling rules
 
@@ -244,6 +264,13 @@ color = "bold bright_red"
 name = "Debug messages"
 pattern = '(?i)\[debug\]'
 color = "bright_green"
+
+[profiles.nginx]
+
+[[profiles.nginx.rules]]
+name = "Nginx request method"
+pattern = '\b(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\b'
+color = "bright_cyan"
 ```
 
 Example ad-hoc rules (`rules.toml`):
@@ -260,7 +287,29 @@ name = "Cache misses"
 pattern = "cache-miss"
 color = "orange3"
 regex = false
+
+[profiles.nginx]
+
+[[profiles.nginx.rules]]
+name = "Nginx upstream status"
+pattern = "upstream_status="
+color = "yellow"
+regex = false
 ```
 
 These sample ad-hoc rules match literal text. Rules added interactively are
-also saved as literal matches in `rules.toml`.
+also saved as literal matches in `rules.toml`. Top-level `[[rules]]` entries
+are shared by every profile; rules under `[profiles.NAME]` apply only to the
+matching profile in `ctail.toml`. Interactive rules are saved to the active
+profile when one is selected, and as shared rules otherwise. Select a profile
+explicitly, for example:
+
+```sh
+ctail --profile nginx -f /var/log/nginx/access.log
+```
+
+The profile name is the key beneath `[profiles]` in `ctail.toml`. Profiles
+replace that file's top-level `[[rules]]`; shared and matching temporary rules,
+built-in rules, and global settings such as `show_unmatched` still apply.
+`--show-rules --profile nginx` displays the active rules and identifies
+profile-specific entries.

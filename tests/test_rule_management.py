@@ -144,7 +144,9 @@ class RuleManagementTests(unittest.TestCase):
                 self.assertEqual(restored.disabled, rule.disabled)
         self.assertIn("# main comment", self.config_path.read_text())
         self.assertIn("# keep this", self.config_path.read_text())
-        self.assertEqual(tomllib.loads(self.config_path.read_text())["extra"]["value"], 42)
+        data = tomllib.loads(self.config_path.read_text())
+        self.assertTrue(data["show_unmatched"])
+        self.assertEqual(data["extra"]["value"], 42)
 
     def test_delete_custom_rules_from_both_files(self):
         self.write_custom_rules()
@@ -153,10 +155,71 @@ class RuleManagementTests(unittest.TestCase):
             _change_rule(rule, self.rules_path, delete=True)
             self.assertNotIn(pattern, [rule.pattern for rule in self.load_rules()])
         self.assertEqual(tomllib.loads(self.rules_path.read_text())["note"], "keep me")
-        data = tomllib.loads(self.config_path.read_text())
-        self.assertTrue(data["show_unmatched"])
-        self.assertEqual(data["extra"]["value"], 42)
-        self.assertIn("# main comment", self.config_path.read_text())
+
+    def test_profile_rule_can_be_toggled_and_deleted_in_place(self):
+        self.config_path.write_text(
+            '[[rules]]\npattern = "default"\ncolor = "red"\n\n'
+            "[profiles.nginx]\n"
+            '[[profiles.nginx.rules]]\n'
+            'pattern = "main-profile-rule"\ncolor = "yellow"\n'
+        )
+        self.rules_path.write_text(
+            '[[rules]]\npattern = "shared-rule"\ncolor = "cyan"\n\n'
+            "[profiles.nginx]\n"
+            '[[profiles.nginx.rules]]\n'
+            'pattern = "profile-rule"\ncolor = "green"\n\n'
+            '[[profiles.nginx.rules]]\n'
+            'pattern = "second-profile-rule"\ncolor = "blue"\n'
+        )
+        rule = next(
+            rule for rule in _load_settings(self.config_dir, "nginx")[1]
+            if rule.pattern == "profile-rule"
+        )
+
+        _change_rule(rule, self.rules_path, delete=False, profile="nginx")
+
+        disabled = next(
+            rule for rule in _load_settings(self.config_dir, "nginx")[1]
+            if rule.pattern == "profile-rule"
+        )
+        self.assertTrue(disabled.disabled)
+        _change_rule(disabled, self.rules_path, delete=True, profile="nginx")
+
+        remaining = _load_settings(self.config_dir, "nginx")[1]
+        self.assertNotIn("profile-rule", [rule.pattern for rule in remaining])
+        self.assertIn("second-profile-rule", [rule.pattern for rule in remaining])
+        self.assertEqual(
+            tomllib.loads(self.rules_path.read_text())["profiles"]["nginx"]["rules"][0][
+                "pattern"
+            ],
+            "second-profile-rule",
+        )
+        self.assertIn("main-profile-rule", [
+            rule.pattern for rule in _load_settings(self.config_dir, "nginx")[1]
+        ])
+        self.assertIn("shared-rule", [
+            rule.pattern for rule in _load_settings(self.config_dir, "nginx")[1]
+        ])
+
+    def test_interactive_rule_writer_scopes_rules_to_active_profile(self):
+        self.config_path.write_text("[profiles.nginx]\n")
+        self.rules_path.write_text('[[rules]]\npattern = "shared"\ncolor = "red"\n')
+
+        _write_ad_hoc_rule(
+            self.rules_path, "request_id=", "bright_cyan", profile_name="nginx"
+        )
+
+        data = tomllib.loads(self.rules_path.read_text())
+        self.assertEqual(data["rules"][0]["pattern"], "shared")
+        self.assertEqual(
+            data["profiles"]["nginx"]["rules"][0]["pattern"], "request_id="
+        )
+        self.assertIn("request_id=", [
+            rule.pattern for rule in _load_settings(self.config_dir, "nginx")[1]
+        ])
+        self.assertNotIn("request_id=", [
+            rule.pattern for rule in _load_settings(self.config_dir)[1]
+        ])
 
     def test_duplicate_patterns_edit_selected_occurrence(self):
         self.rules_path.write_text(

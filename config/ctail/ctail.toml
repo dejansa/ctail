@@ -35,3 +35,10 @@ color = "bold magenta"
 name = "Debug level"
 pattern = '(?i)\[debug\]'
 color = "bright_black"
+
+[profiles.http-access]
+
+[[profiles.http-access.rules]]
+name = "HTTP request method"
+pattern = '\b(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\b'
+color = "bright_cyan"

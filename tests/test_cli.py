@@ -129,6 +129,83 @@ class ListingTests(unittest.TestCase):
             self.assertIn(pattern, output)
             self.assertIn(color, output)
 
+    def test_profile_rules_replace_main_rules_and_keep_global_rules(self):
+        (self.config_dir / "ctail.toml").write_text(
+            '[[rules]]\npattern = "default-only"\ncolor = "red"\n\n'
+            '[profiles.nginx]\n'
+            '[[profiles.nginx.rules]]\n'
+            'name = "Nginx request method"\n'
+            'pattern = "nginx-only"\n'
+            'color = "green"\n'
+        )
+        (self.config_dir / "rules.toml").write_text(
+            '[[rules]]\npattern = "shared-literal"\ncolor = "blue"\nregex = false\n\n'
+            '[profiles.nginx]\n'
+            '[[profiles.nginx.rules]]\n'
+            'name = "Nginx request identifier"\n'
+            'pattern = "nginx-request-id"\n'
+            'color = "yellow"\n'
+        )
+
+        _, default_rules, _ = _load_settings(self.config_dir)
+        _, profile_rules, _ = _load_settings(self.config_dir, "nginx")
+
+        self.assertIn("default-only", [rule.pattern for rule in default_rules])
+        self.assertNotIn("nginx-only", [rule.pattern for rule in default_rules])
+        self.assertNotIn("default-only", [rule.pattern for rule in profile_rules])
+        self.assertEqual(profile_rules[0].pattern, "shared-literal")
+        profile_rule = next(
+            rule for rule in profile_rules if rule.pattern == "nginx-request-id"
+        )
+        self.assertEqual(profile_rule.profile_name, "nginx")
+        self.assertIn("nginx-only", [rule.pattern for rule in profile_rules])
+
+    def test_unknown_profile_lists_available_profiles(self):
+        (self.config_dir / "ctail.toml").write_text(
+            "[profiles.nginx]\n"
+        )
+
+        with self.assertRaisesRegex(
+            ValueError, "unknown profile 'missing'; available profiles: nginx"
+        ):
+            _load_settings(self.config_dir, "missing")
+
+    def test_profile_option_shows_only_selected_profile_rules(self):
+        (self.config_dir / "ctail.toml").write_text(
+            '[[rules]]\npattern = "default-only"\ncolor = "red"\n\n'
+            "[profiles.nginx]\n"
+            '[[profiles.nginx.rules]]\n'
+            'name = "Nginx access"\n'
+            'pattern = "nginx-only"\n'
+            'color = "green"\n'
+        )
+
+        output = self.invoke("--show-rules", "--profile", "nginx", "--no-color")
+
+        self.assertIn("profile: nginx", output)
+        self.assertIn("nginx-only", output)
+        self.assertNotIn("default-only", output)
+
+    def test_list_profiles_alias_and_long_option(self):
+        (self.config_dir / "ctail.toml").write_text(
+            "[profiles.http-access]\n"
+            "[profiles.database]\n"
+        )
+
+        for option in ("-lsp", "--list-profiles"):
+            with self.subTest(option=option):
+                output = self.invoke(option, "--no-color")
+                self.assertIn("Configured profiles", output)
+                self.assertIn("database", output)
+                self.assertIn("http-access", output)
+
+    def test_list_profiles_reports_when_none_are_configured(self):
+        (self.config_dir / "ctail.toml").write_text("show_unmatched = true\n")
+
+        output = self.invoke("--list-profiles", "--no-color")
+
+        self.assertIn("No named profiles configured.", output)
+
     def test_first_run_creates_example_configuration(self):
         self.config_dir = Path(self.directory.name) / ".config" / "ctail"
 
@@ -139,6 +216,7 @@ class ListingTests(unittest.TestCase):
         self.assertTrue(main_config_path.is_file())
         self.assertTrue(rules_config_path.is_file())
         self.assertIn("show_unmatched = true", main_config_path.read_text())
+        self.assertIn("[profiles.http-access]", main_config_path.read_text())
         self.assertIn("Syslog timestamp", output)
         self.assertIn("Log analysis GET requests", rules_config_path.read_text())
 
