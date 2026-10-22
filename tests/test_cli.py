@@ -179,12 +179,24 @@ class ListingTests(unittest.TestCase):
             'pattern = "nginx-only"\n'
             'color = "green"\n'
         )
+        (self.config_dir / "rules.toml").write_text(
+            '[[rules]]\npattern = "shared-only"\ncolor = "blue"\nregex = false\n\n'
+            "[profiles.nginx]\n"
+            '[[profiles.nginx.rules]]\n'
+            'name = "Nginx temporary rule"\n'
+            'pattern = "nginx-temporary-only"\n'
+            'color = "yellow"\nregex = false\n'
+        )
 
-        output = self.invoke("--show-rules", "--profile", "nginx", "--no-color")
+        output = self.invoke("-p", "nginx", "-shr", "--no-color")
 
+        self.assertIn("Coloring rules for profile 'nginx'", output)
         self.assertIn("profile: nginx", output)
         self.assertIn("nginx-only", output)
+        self.assertIn("nginx-temporary-only", output)
         self.assertNotIn("default-only", output)
+        self.assertNotIn("shared-only", output)
+        self.assertNotIn(DEFAULT_RULES[0][0], output)
 
     def test_list_profiles_alias_and_long_option(self):
         (self.config_dir / "ctail.toml").write_text(

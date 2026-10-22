@@ -297,8 +297,17 @@ def _list_colors(console: Console) -> None:
     )
 
 
-def _show_rules(console: Console, rules: list[ColorRule]) -> None:
-    table = Table(title="Coloring rules (highest priority first)")
+def _show_rules(
+    console: Console, rules: list[ColorRule], profile: str | None = None
+) -> None:
+    if profile is not None:
+        rules = [rule for rule in rules if rule.profile_name == profile]
+    title = (
+        f"Coloring rules for profile {profile!r} (highest priority first)"
+        if profile is not None
+        else "Coloring rules (highest priority first)"
+    )
+    table = Table(title=title)
     for heading in ("Priority", "Source", "Status", "Mode", "Name", "Pattern", "Style"):
         table.add_column(heading)
     for priority, rule in enumerate(rules, start=1):
@@ -847,7 +856,7 @@ def main() -> None:
     parser.add_argument(
         "-shr", "--show-rules",
         action="store_true",
-        help="show ad-hoc, user-configured, and built-in coloring rules and exit",
+        help="show coloring rules, optionally scoped to a profile, and exit",
     )
     options, tail_arguments = parser.parse_known_args()
 
@@ -870,7 +879,7 @@ def main() -> None:
                 return
         show_unmatched, rules, rules_path = _load_settings(config_dir, options.profile)
         if options.show_rules:
-            _show_rules(console, rules)
+            _show_rules(console, rules, options.profile)
             return
         if options.less:
             _show_with_less(tail_arguments, console, rules, show_unmatched)

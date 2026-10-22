@@ -130,12 +130,12 @@ valid configuration files.
 `--list-profiles` prints the named profiles configured in
 `~/.config/ctail/ctail.toml`. It accepts the short alias `-lsp`.
 
-`--show-rules` lists all loaded rules in priority order: ad-hoc rules from
-`~/.config/ctail/rules.toml`, profile-specific temporary rules when a profile is
-selected, rules from that profile (or, by default, the top-level rules in
-`~/.config/ctail/ctail.toml`), then built-in rules. Each entry shows its source,
-enabled/disabled status, regex/literal mode, optional name, pattern, and style
-rendered in its configured colors.
+`--show-rules` without a profile lists the default rules in priority order:
+shared ad-hoc rules, top-level rules from `~/.config/ctail/ctail.toml`, and
+built-in rules. With `--profile NAME`, it lists only rules declared for that
+profile in either configuration file; shared and built-in rules are omitted.
+Each entry shows its source, enabled/disabled status, regex/literal mode,
+optional name, pattern, and style rendered in its configured colors.
 
 These listing commands exit without reading stdin or starting `tail`. Colors
 are shown in a terminal; redirected output and `--no-color` produce plain text.
