@@ -465,19 +465,28 @@ class RuleManagementTests(unittest.TestCase):
             os.close(slave_fd)
 
     def test_pty_builtin_disable_enable_applies_to_live_stream(self):
+        self.config_path.write_text("show_unmatched = false\n")
         with self.running_app() as (master_fd, log_path):
+            error_rule_index = next(
+                index for index, rule in enumerate(self.load_rules())
+                if rule.pattern == DEFAULT_RULES[0][0]
+            )
             os.write(master_fd, b"d")
             self.read_until(master_fd, b"Enable/disable rule")
-            os.write(master_fd, b"\r")
+            os.write(master_fd, b"\x1b[B" * error_rule_index + b"\r")
             self.read_until(master_fd, b"Disabled rule")
-            self.assertTrue(self.load_rules()[0].disabled)
+            error_rule = next(
+                rule for rule in self.load_rules()
+                if rule.pattern == DEFAULT_RULES[0][0]
+            )
+            self.assertTrue(error_rule.disabled)
             with log_path.open("a") as log:
                 log.write("[ERROR] hidden-error\n[INFO] visible-info\n")
             output = self.read_until(master_fd, b"visible-info")
             self.assertNotIn(b"hidden-error", output)
             os.write(master_fd, b"d")
             self.read_until(master_fd, b"Enable/disable rule")
-            os.write(master_fd, b"\r")
+            os.write(master_fd, b"\x1b[B" * error_rule_index + b"\r")
             self.read_until(master_fd, b"Enabled rule")
             with log_path.open("a") as log:
                 log.write("[ERROR] visible-error\n")

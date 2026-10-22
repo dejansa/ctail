@@ -51,6 +51,36 @@ def _config_directory() -> Path:
     return Path.home() / ".config" / "ctail"
 
 
+def _example_config_directory() -> Path:
+    installed_config_dir = Path(__file__).resolve().parent
+    filenames = ("ctail.toml", "rules.toml")
+    if all((installed_config_dir / name).is_file() for name in filenames):
+        return installed_config_dir
+
+    source_config_dir = Path(__file__).resolve().parents[2] / "config" / "ctail"
+    if all((source_config_dir / name).is_file() for name in filenames):
+        return source_config_dir
+
+    raise FileNotFoundError("Could not locate packaged ctail configuration examples")
+
+
+def _initialize_config(config_dir: Path) -> None:
+    config_dir.mkdir(parents=True, exist_ok=True)
+
+    example_dir = _example_config_directory()
+    for name in ("ctail.toml", "rules.toml"):
+        config_path = config_dir / name
+        if config_path.exists():
+            continue
+
+        example = (example_dir / name).read_text(encoding="utf-8")
+        try:
+            with config_path.open("x", encoding="utf-8") as config_file:
+                config_file.write(example)
+        except FileExistsError:
+            pass
+
+
 def _parse_rules(
     data: Any, source: Path, *, allow_builtins: bool = False
 ) -> list[ColorRule]:
@@ -559,6 +589,7 @@ def main() -> None:
     keyboard_fd: int | None = None
     original_terminal: list[Any] | None = None
     try:
+        _initialize_config(config_dir)
         if options.list_colors:
             _list_colors(console)
             if not options.show_rules:

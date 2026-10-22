@@ -121,6 +121,42 @@ class ListingTests(unittest.TestCase):
             self.assertIn(pattern, output)
             self.assertIn(color, output)
 
+    def test_first_run_creates_example_configuration(self):
+        self.config_dir = Path(self.directory.name) / ".config" / "ctail"
+
+        output = self.invoke("--show-rules", "--no-color")
+
+        main_config_path = self.config_dir / "ctail.toml"
+        rules_config_path = self.config_dir / "rules.toml"
+        self.assertTrue(main_config_path.is_file())
+        self.assertTrue(rules_config_path.is_file())
+        self.assertIn("show_unmatched = true", main_config_path.read_text())
+        self.assertIn("Syslog timestamp", output)
+        self.assertIn("Log analysis GET requests", rules_config_path.read_text())
+
+    def test_first_run_preserves_existing_configuration(self):
+        original = 'show_unmatched = false\n\n[[rules]]\npattern = "custom"\ncolor = "red"\n'
+        original_rules = '[[rules]]\npattern = "custom literal"\ncolor = "blue"\nregex = false\n'
+        (self.config_dir / "ctail.toml").write_text(original)
+        (self.config_dir / "rules.toml").write_text(original_rules)
+
+        self.invoke("--show-rules", "--no-color")
+
+        self.assertEqual((self.config_dir / "ctail.toml").read_text(), original)
+        self.assertEqual((self.config_dir / "rules.toml").read_text(), original_rules)
+
+    def test_first_run_adds_missing_file_without_replacing_existing_one(self):
+        original = 'show_unmatched = false\n\n[[rules]]\npattern = "custom"\ncolor = "red"\n'
+        (self.config_dir / "ctail.toml").write_text(original)
+
+        self.invoke("--show-rules", "--no-color")
+
+        self.assertEqual((self.config_dir / "ctail.toml").read_text(), original)
+        self.assertIn(
+            "Log analysis GET requests",
+            (self.config_dir / "rules.toml").read_text(),
+        )
+
     def test_literal_and_background_rendering_preserved(self):
         self.write_rules()
         show_unmatched, rules, _ = _load_settings(self.config_dir)

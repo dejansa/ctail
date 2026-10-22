@@ -9,6 +9,25 @@ ctail -f /var/log/myapp.log
 cat application.log | ctail
 ```
 
+## Install from GitLab
+
+With SSH access to the GitLab repository and Python 3.14 or newer, install the
+tool with either `uv` or `pipx`:
+
+```sh
+uv tool install 'git+ssh://git@gitlab.com/aviatnetworks/qa/tools/ctail.git'
+# or
+pipx install 'git+ssh://git@gitlab.com/aviatnetworks/qa/tools/ctail.git'
+```
+
+Both commands install the `ctail` command into the tool's executable path
+(typically `~/.local/bin`). On the first run, `ctail` creates
+`~/.config/ctail/` and copies in an example `ctail.toml` if one does not
+already exist. Existing configuration is never replaced, including when
+upgrading the tool. The starter files are maintained in the repository's
+top-level `config/` folder. Add `~/.local/bin` to `PATH` if it is not already
+there.
+
 Configuration lives in `~/.config/ctail/ctail.toml`. Rules are applied only
 to the matching part of a line; regex rules are checked in file order, and
 earlier rules take precedence when matches overlap. Unmatched lines are hidden
@@ -180,10 +199,12 @@ starts a new rule, so a configuration can define any number of rules with the
 same `pattern` and `color` keys. In contrast, `[rules]` defines only one table
 and cannot be repeated to add more rules.
 
-The runtime configuration directory is not created automatically. Create it
-and save the examples below as `~/.config/ctail/ctail.toml` and
-`~/.config/ctail/rules.toml`, respectively. The second file is separate so
-interactive rules can be added without changing the main configuration.
+The runtime configuration directory and both starter files are created
+automatically on the first run if they are missing. The examples are maintained
+in the repository's top-level `config/` folder. Interactive rules are saved in
+the separate `~/.config/ctail/rules.toml` file without changing the main
+configuration. To add ad-hoc rules manually, save the example below as
+`~/.config/ctail/rules.toml`.
 
 Example main configuration (`ctail.toml`):
 
