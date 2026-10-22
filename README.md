@@ -51,10 +51,12 @@ Built-in rules color `[ERROR]`/`[FATAL]`, `[WARN]`/`[WARNING]`, `[INFO]`, and
 `[DEBUG]` (case-insensitively). Custom rules take precedence over built-ins.
 
 When following a file in an interactive terminal, press **Space** to
-pause/resume, **c** to add a literal text/color rule, **r** to remove a custom
-rule, **d** to enable/disable any rule, **?** to show the interactive command
-list, or **q** to quit. The help panel closes when any key is pressed. Rules
-created with **c** are saved separately in
+pause/resume, **f** to toggle whether unmatched lines are shown, **c** to add a
+literal text/color rule, **r** to remove a custom rule, **d** to enable/disable
+any rule, **?** to show the interactive command list, or **q** to quit. The
+**f** toggle applies only to the current run; it does not change
+`ctail.toml`. The help panel closes when any key is pressed. Rules created
+with **c** are saved separately in
 `~/.config/ctail/rules.toml`, and take precedence over the main configuration.
 Use `--no-color` to disable colored output.
 

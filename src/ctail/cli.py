@@ -420,6 +420,7 @@ def _show_interactive_help(console: Console, keyboard_fd: int) -> None:
     commands.add_column("Command")
     commands.add_row("Space", "Pause or resume log output")
     commands.add_row("c", "Add a literal color rule")
+    commands.add_row("f", "Toggle display of unmatched lines")
     commands.add_row("r", "Select and remove a custom rule")
     commands.add_row("d", "Select a rule and enable or disable it")
     commands.add_row("?", "Show this command list")
@@ -461,6 +462,10 @@ def _consume_stream(
             if key == b" ":
                 paused = not paused
                 console.print("Paused." if paused else "Resumed.", style="dim")
+            elif key in (b"f", b"F"):
+                show_unmatched = not show_unmatched
+                state = "shown" if show_unmatched else "hidden"
+                console.print(f"Unmatched lines {state}.", style="dim")
             elif key in (b"c", b"C") and rules_path is not None and original_terminal is not None:
                 _add_rule(console, rules, rules_path, keyboard_fd, original_terminal)
             elif key in (b"r", b"R", b"d", b"D") and rules_path is not None:

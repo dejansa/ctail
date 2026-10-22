@@ -9,7 +9,7 @@ from unittest.mock import patch
 from rich.color import ANSI_COLOR_NAMES
 from rich.console import Console
 
-from ctail.cli import DEFAULT_RULES, _load_settings, _render_line, main
+from ctail.cli import DEFAULT_RULES, _consume_stream, _load_settings, _render_line, main
 
 
 class ListingTests(unittest.TestCase):
@@ -65,7 +65,7 @@ class ListingTests(unittest.TestCase):
             with self.assertRaises(SystemExit) as caught:
                 main()
         self.assertEqual(caught.exception.code, 0)
-        for key in ("Space", "c", "r", "d", "?", "q"):
+        for key in ("Space", "c", "f", "r", "d", "?", "q"):
             self.assertIn(key, output.getvalue())
 
     def test_rules_aliases_show_sources_modes_and_priority(self):
@@ -129,6 +129,32 @@ class ListingTests(unittest.TestCase):
         self.assertEqual(rendered.plain, "before [literal] after")
         self.assertEqual(rendered.spans[0].style, "bold white on red")
         self.assertIsNone(_render_line("literal", rules, show_unmatched))
+
+    def test_f_toggles_unmatched_line_visibility_for_current_session(self):
+        output = io.StringIO()
+        console = Console(file=output, no_color=True)
+        ready_fds = iter(([11], [10], [11], [10], [10]))
+        reads = {
+            11: [b"f", b"f"],
+            10: [b"visible unmatched\n", b"hidden unmatched\n", b""],
+        }
+
+        with (
+            patch(
+                "ctail.cli.select.select",
+                side_effect=lambda *_args: (next(ready_fds), [], []),
+            ),
+            patch("ctail.cli.os.read", side_effect=lambda fd, _size: reads[fd].pop(0)),
+        ):
+            completed = _consume_stream(
+                10, console, [], False, keyboard_fd=11
+            )
+
+        self.assertTrue(completed)
+        self.assertIn("visible unmatched", output.getvalue())
+        self.assertNotIn("hidden unmatched", output.getvalue())
+        self.assertIn("Unmatched lines shown.", output.getvalue())
+        self.assertIn("Unmatched lines hidden.", output.getvalue())
 
 
 if __name__ == "__main__":
