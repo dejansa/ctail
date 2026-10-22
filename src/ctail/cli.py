@@ -37,6 +37,7 @@ class ColorRule:
     disabled: bool = False
     source_index: int | None = None
     name: str | None = None
+    group_colors: tuple[str, ...] = ()
 
 
 DEFAULT_RULES = (
@@ -81,6 +82,22 @@ def _initialize_config(config_dir: Path) -> None:
             pass
 
 
+def _split_colors(value: str) -> tuple[str, ...]:
+    colors: list[str] = []
+    start = 0
+    parentheses = 0
+    for index, character in enumerate(value):
+        if character == "(":
+            parentheses += 1
+        elif character == ")":
+            parentheses = max(0, parentheses - 1)
+        elif character == "," and parentheses == 0:
+            colors.append(value[start:index].strip())
+            start = index + 1
+    colors.append(value[start:].strip())
+    return tuple(colors)
+
+
 def _parse_rules(
     data: Any, source: Path, *, allow_builtins: bool = False
 ) -> list[ColorRule]:
@@ -116,6 +133,11 @@ def _parse_rules(
             raise TypeError(f"{source}: rule {index} 'color' must be a string")
         if not color:
             raise ValueError(f"{source}: rule {index} needs a non-empty string 'color'")
+        colors = _split_colors(color)
+        if any(not item for item in colors):
+            raise ValueError(
+                f"{source}: rule {index} 'color' must not contain an empty color"
+            )
         if not isinstance(disabled, bool):
             raise TypeError(f"{source}: rule {index} 'disabled' must be true or false")
         if not isinstance(regex_enabled, bool):
@@ -123,15 +145,29 @@ def _parse_rules(
         if builtin and not regex_enabled:
             raise ValueError(f"{source}: rule {index}: built-in patterns must use regex")
         try:
-            Style.parse(color)
+            for item in colors:
+                Style.parse(item)
             expression = pattern if regex_enabled else re.escape(pattern)
             compiled = re.compile(expression)
         except (ColorParseError, StyleSyntaxError, re.error) as error:
             raise ValueError(f"{source}: invalid rule {index}: {error}") from error
+        group_colors: tuple[str, ...] = ()
+        if compiled.groups:
+            if len(colors) > compiled.groups + 1:
+                raise ValueError(
+                    f"{source}: rule {index} has {compiled.groups} capture groups; "
+                    f"'color' accepts at most {compiled.groups + 1} colors"
+                )
+            group_colors = colors
+        elif len(colors) > 1:
+            raise ValueError(
+                f"{source}: rule {index} has no capture groups; "
+                "'color' must contain a single color"
+            )
         parsed.append(ColorRule(
             pattern, color, compiled, regex_enabled,
             "built-in" if builtin else str(source), disabled, index - 1,
-            name=name,
+            name=name, group_colors=group_colors,
         ))
     return parsed
 
@@ -202,13 +238,16 @@ def _show_rules(console: Console, rules: list[ColorRule]) -> None:
             "regex" if rule.regex_enabled else "literal",
             rule.name or "-",
             Text(rule.pattern),
-            Text(rule.color, style=rule.color),
+            Text(
+                rule.color,
+                style=rule.group_colors[0] if rule.group_colors else rule.color,
+            ),
         )
     console.print(table)
 
 
 def _render_line(line: str, rules: list[ColorRule], show_unmatched: bool) -> Text | None:
-    matches: list[tuple[int, int, ColorRule]] = []
+    matches: list[tuple[int, int, ColorRule, re.Match[str]]] = []
     cursor = 0
     while cursor < len(line):
         candidate: tuple[int, int, ColorRule, re.Match[str]] | None = None
@@ -226,7 +265,7 @@ def _render_line(line: str, rules: list[ColorRule], show_unmatched: bool) -> Tex
         if candidate is None:
             break
         start, priority, rule, match = candidate
-        matches.append((start, match.end(), rule))
+        matches.append((start, match.end(), rule, match))
         cursor = match.end()
 
     if not matches and not show_unmatched:
@@ -234,9 +273,23 @@ def _render_line(line: str, rules: list[ColorRule], show_unmatched: bool) -> Tex
 
     rendered = Text()
     cursor = 0
-    for start, end, rule in matches:
+    for start, end, rule, match in matches:
         rendered.append(line[cursor:start])
-        rendered.append(line[start:end], style=rule.color)
+        if rule.group_colors:
+            base_color = (
+                rule.group_colors[rule.regex.groups]
+                if len(rule.group_colors) > rule.regex.groups
+                else None
+            )
+            rendered.append(line[start:end], style=base_color)
+            for group_index, group_color in enumerate(
+                rule.group_colors[:rule.regex.groups], start=1
+            ):
+                group_start, group_end = match.span(group_index)
+                if group_start >= 0 and group_end > group_start:
+                    rendered.stylize(group_color, group_start, group_end)
+        else:
+            rendered.append(line[start:end], style=rule.color)
         cursor = end
     rendered.append(line[cursor:])
     return rendered
@@ -398,7 +451,10 @@ def _select_rule(
             )
             if rule.name:
                 row.append(f"{rule.name}: ")
-            row.append(repr(rule.pattern), style=rule.color)
+            row.append(
+                repr(rule.pattern),
+                style=rule.group_colors[0] if rule.group_colors else rule.color,
+            )
             row.append(f" ({rule.color})")
             row.truncate(max(1, console.size.width - 1), overflow="ellipsis")
             if index == selected:

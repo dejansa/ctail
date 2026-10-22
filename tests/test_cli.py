@@ -8,8 +8,16 @@ from unittest.mock import patch
 
 from rich.color import ANSI_COLOR_NAMES
 from rich.console import Console
+from rich.style import Style
 
-from ctail.cli import DEFAULT_RULES, _consume_stream, _load_settings, _render_line, main
+from ctail.cli import (
+    DEFAULT_RULES,
+    _consume_stream,
+    _load_settings,
+    _parse_rules,
+    _render_line,
+    main,
+)
 
 
 class ListingTests(unittest.TestCase):
@@ -165,6 +173,55 @@ class ListingTests(unittest.TestCase):
         self.assertEqual(rendered.plain, "before [literal] after")
         self.assertEqual(rendered.spans[0].style, "bold white on red")
         self.assertIsNone(_render_line("literal", rules, show_unmatched))
+
+    def test_capture_group_colors_and_optional_match_remainder(self):
+        line = "before status=404 route=/x"
+        pattern = r"(status=)(\d{3}).*"
+        source = self.config_dir / "ctail.toml"
+
+        for colors, expected in (
+            (
+                "bright_cyan, bold bright_red, bright_black",
+                {
+                    8: Style.parse("bright_cyan"),
+                    14: Style.parse("bold bright_red"),
+                    20: Style.parse("bright_black"),
+                },
+            ),
+            (
+                "bright_cyan, bold bright_red",
+                {
+                    8: Style.parse("bright_cyan"),
+                    14: Style.parse("bold bright_red"),
+                    20: Style.null(),
+                },
+            ),
+            (
+                "bright_cyan",
+                {
+                    8: Style.parse("bright_cyan"),
+                    14: Style.null(),
+                    20: Style.null(),
+                },
+            ),
+        ):
+            with self.subTest(colors=colors):
+                rules = _parse_rules(
+                    [{"pattern": pattern, "color": colors}], source
+                )
+                rendered = _render_line(line, rules, False)
+                self.assertIsNotNone(rendered)
+                assert rendered is not None
+                self.assertEqual(rendered.plain, line)
+                for offset, style in expected.items():
+                    self.assertEqual(rendered.get_style_at_offset(offset), style)
+
+    def test_capture_group_color_parser_preserves_rgb_commas(self):
+        rules = _parse_rules(
+            [{"pattern": "(value)(\\d+)", "color": "rgb(1,2,3), red"}],
+            self.config_dir / "ctail.toml",
+        )
+        self.assertEqual(rules[0].group_colors, ("rgb(1,2,3)", "red"))
 
     def test_f_toggles_unmatched_line_visibility_for_current_session(self):
         output = io.StringIO()

@@ -66,6 +66,16 @@ through `color(255)`.
 Set `regex = false` on a rule to match its pattern literally. If omitted,
 `regex` defaults to `true`.
 
+For regex rules with capture groups, `color` can contain comma-separated
+styles. Each style colors the corresponding capture group from left to right;
+an optional style after the group styles colors the rest of the regex match.
+For example, `color = "bright_cyan, bold bright_red, bright_black"` colors
+`status=` cyan, the captured status code red, and the rest of the matched text
+black. With only one or two styles, groups without a corresponding style and
+the rest of the match are left unchanged. A rule without capture groups keeps
+the existing behavior of coloring the whole match with its single color.
+Commas inside `rgb(r,g,b)` are treated as part of that color.
+
 Built-in rules color `[ERROR]`/`[FATAL]`, `[WARN]`/`[WARNING]`, `[INFO]`, and
 `[DEBUG]` (case-insensitively). Custom rules take precedence over built-ins.
 

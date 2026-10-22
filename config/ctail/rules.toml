@@ -12,3 +12,9 @@ name = "Cache misses"
 pattern = '(?i)\bcache[- ]miss(?:es)?\b'
 color = "orange3"
 regex = true
+
+[[rules]]
+name = "Request duration field"
+pattern = '(duration=)(\d+)'
+color = "bright_cyan, yellow"
+regex = true
