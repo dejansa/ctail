@@ -12,7 +12,7 @@ import termios
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO, TextIO
 
 import tomlkit
 from rich.color import ANSI_COLOR_NAMES, ColorParseError
@@ -606,9 +606,87 @@ def _tail_process(arguments: list[str]) -> subprocess.Popen[bytes]:
     return process
 
 
+def _less_process() -> subprocess.Popen[str]:
+    less = shutil.which("less")
+    if less is None:
+        raise RuntimeError("could not find the 'less' executable")
+    try:
+        process = subprocess.Popen(
+            [less, "-R"],
+            stdin=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+        )
+    except OSError as error:
+        raise RuntimeError(f"could not start less: {error}") from error
+    if process.stdin is None:
+        process.terminate()
+        raise RuntimeError("less did not provide an input stream")
+    return process
+
+
+def _colorize_stream(
+    source: BinaryIO,
+    console: Console,
+    rules: list[ColorRule],
+    show_unmatched: bool,
+) -> None:
+    for raw_line in source:
+        rendered = _render_line(raw_line.decode("utf-8", errors="replace"), rules, show_unmatched)
+        if rendered is not None:
+            console.print(rendered, end="", soft_wrap=True)
+
+
+def _close_pager_input(stream: TextIO) -> None:
+    try:
+        stream.close()
+    except BrokenPipeError:
+        pass
+
+
+def _show_with_less(
+    arguments: list[str],
+    console: Console,
+    rules: list[ColorRule],
+    show_unmatched: bool,
+) -> None:
+    file_arguments = arguments[1:] if arguments[:1] == ["--"] else arguments
+    if any(argument.startswith("-") for argument in file_arguments):
+        raise ValueError("--less accepts file paths, not tail options")
+    if not file_arguments and sys.stdin.isatty():
+        raise ValueError("provide a file or piped input when using --less")
+
+    process = _less_process()
+    assert process.stdin is not None
+    pager_console = Console(
+        file=process.stdin,
+        color_system=console.color_system,
+        force_terminal=console.is_terminal,
+        width=console.width,
+    )
+    try:
+        if file_arguments:
+            for filename in file_arguments:
+                with Path(filename).open("rb") as source:
+                    _colorize_stream(source, pager_console, rules, show_unmatched)
+        else:
+            _colorize_stream(sys.stdin.buffer, pager_console, rules, show_unmatched)
+    except BrokenPipeError:
+        pass
+    except OSError:
+        process.terminate()
+        _close_pager_input(process.stdin)
+        process.wait()
+        raise
+    _close_pager_input(process.stdin)
+    return_code = process.wait()
+    if return_code:
+        raise RuntimeError(f"less exited with status {return_code}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Tail logs and colorize matching parts of each line.",
+        description="Colorize log output and either tail it or page through it.",
         epilog=(
             "Interactive file-following keys (when stdin and stdout are terminals):\n"
             "  Space  Pause or resume log output\n"
@@ -624,6 +702,11 @@ def main() -> None:
         "--no-color",
         action="store_true",
         help="disable colored output",
+    )
+    parser.add_argument(
+        "-l", "--less",
+        action="store_true",
+        help="show the full file in less instead of tailing it",
     )
     parser.add_argument(
         "-lsc", "--list-colors",
@@ -653,6 +736,9 @@ def main() -> None:
         show_unmatched, rules, rules_path = _load_settings(config_dir)
         if options.show_rules:
             _show_rules(console, rules)
+            return
+        if options.less:
+            _show_with_less(tail_arguments, console, rules, show_unmatched)
             return
         has_file_source = sys.stdin.isatty() and bool(tail_arguments)
         process = _tail_process(tail_arguments) if has_file_source else None

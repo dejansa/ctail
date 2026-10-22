@@ -9,6 +9,15 @@ ctail -f /var/log/myapp.log
 cat application.log | ctail
 ```
 
+Use `-l` or `--less` to colorize a complete file and browse it with the system
+`less` pager instead of tailing it. Pager mode accepts file paths or piped input
+and requires `less` to be installed:
+
+```sh
+ctail --less /var/log/myapp.log
+cat application.log | ctail -l
+```
+
 ## Install from GitLab
 
 With SSH access to the GitLab repository and Python 3.14 or newer, install the

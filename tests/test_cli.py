@@ -250,5 +250,51 @@ class ListingTests(unittest.TestCase):
         self.assertIn("Unmatched lines hidden.", output.getvalue())
 
 
+class LessModeTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.config_dir = Path(self.directory.name)
+
+    def test_less_aliases_colorize_the_entire_file_without_tailing(self):
+        source = self.config_dir / "application.log"
+        source.write_text("first line\n[ERROR] failure\nlast line\n", encoding="utf-8")
+        (self.config_dir / "ctail.toml").write_text(
+            "show_unmatched = true\n", encoding="utf-8"
+        )
+        pagers = []
+
+        class PagerInput(io.StringIO):
+            def close(self):
+                self.contents = self.getvalue()
+                super().close()
+
+        class Pager:
+            def __init__(self):
+                self.stdin = PagerInput()
+                pagers.append(self)
+
+            @staticmethod
+            def wait():
+                return 0
+
+        for option in ("-l", "--less"):
+            with self.subTest(option=option):
+                output = io.StringIO()
+                with (
+                    redirect_stdout(output),
+                    patch.object(output, "isatty", return_value=True),
+                    patch("sys.argv", ["ctail", option, str(source)]),
+                    patch("ctail.cli._config_directory", return_value=self.config_dir),
+                    patch("ctail.cli._less_process", side_effect=Pager),
+                ):
+                    main()
+
+                rendered = pagers[-1].stdin.contents
+                self.assertIn("first line", rendered)
+                self.assertIn("last line", rendered)
+                self.assertIn("\x1b[", rendered)
+
+
 if __name__ == "__main__":
     unittest.main()
