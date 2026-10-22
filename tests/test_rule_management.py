@@ -75,6 +75,25 @@ class RuleManagementTests(unittest.TestCase):
             with self.subTest(data=data), self.assertRaises(TypeError):
                 _parse_rules(data, self.rules_path)
 
+    def test_name_is_optional_and_preserved_when_provided(self):
+        rules = _parse_rules(
+            [
+                {"pattern": "unnamed", "color": "red"},
+                {"name": "Named rule", "pattern": "named", "color": "blue"},
+            ],
+            self.rules_path,
+        )
+        self.assertIsNone(rules[0].name)
+        self.assertEqual(rules[1].name, "Named rule")
+
+    def test_name_must_be_a_non_empty_string_when_provided(self):
+        for name, exception in ((1, TypeError), ("", ValueError)):
+            with self.subTest(name=name), self.assertRaises(exception):
+                _parse_rules(
+                    [{"name": name, "pattern": "x", "color": "red"}],
+                    self.rules_path,
+                )
+
     def test_disabled_rules_do_not_match_or_trigger_empty_match_errors(self):
         rules = _parse_rules(
             [{"pattern": ".*?", "color": "red", "disabled": True}],
@@ -301,12 +320,28 @@ class RuleManagementTests(unittest.TestCase):
 
     def test_selector_arrows_paging_and_enter(self):
         self.write_custom_rules()
+        contents = self.rules_path.read_text().replace(
+            'pattern = "literal"', 'name = "Literal match"\npattern = "literal"'
+        )
+        self.rules_path.write_text(contents)
         rules = self.load_rules()
         with patch("ctail.cli._read_rule_key", side_effect=[
             "up", "down", "down", "down", "up", "enter",
         ]):
             chosen = _select_rule(self.console, rules, 0, delete=False)
         self.assertEqual(chosen, rules[2])
+        self.assertIn("Literal match", self.output.getvalue())
+
+    def test_listing_includes_rule_name_and_pattern(self):
+        self.rules_path.write_text(
+            '[[rules]]\nname = "Request identifier"\n'
+            'pattern = "request_id="\ncolor = "cyan"\n'
+        )
+        _show_rules(self.console, self.load_rules())
+        output = self.output.getvalue()
+        self.assertIn("Name", output)
+        self.assertIn("Request identifier", output)
+        self.assertIn("request_id=", output)
 
     def test_delete_selector_excludes_builtins(self):
         self.write_custom_rules()

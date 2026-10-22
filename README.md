@@ -19,17 +19,24 @@ display them.
 show_unmatched = true
 
 [[rules]]
+name = "Log timestamp"
 pattern = '\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}'
 color = "bright_black"
 
 [[rules]]
+name = "Errors and fatal messages"
 pattern = '(?i)\[(?:error|fatal)\]'
 color = "bold bright_red"
 
 [[rules]]
+name = "Debug messages"
 pattern = '(?i)\[debug\]'
 color = "bright_green"
 ```
+
+`name` is an optional descriptive label for a rule. It is shown with the
+pattern in `--show-rules` and the interactive rule selector. Existing rules
+without a name remain valid.
 
 Colors use Rich style names, including the standard and bright ANSI colors,
 256-color names such as `orange3`, and combinations such as `bold magenta`.
@@ -67,7 +74,8 @@ valid configuration files.
 `--show-rules` lists all loaded rules in priority order: ad-hoc rules from
 `~/.config/ctail/rules.toml`, user rules from `~/.config/ctail/ctail.toml`,
 then built-in rules. Each entry shows its source, enabled/disabled status,
-regex/literal mode, pattern, and style rendered in its configured colors.
+regex/literal mode, optional name, pattern, and style rendered in its configured
+colors.
 
 Both commands exit without reading stdin or starting `tail`. Colors are shown
 in a terminal; redirected output and `--no-color` produce plain text.
@@ -181,14 +189,17 @@ Example main configuration (`ctail.toml`):
 show_unmatched = true
 
 [[rules]]
+name = "Log timestamp"
 pattern = '\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}'
 color = "bright_black"
 
 [[rules]]
+name = "Errors and fatal messages"
 pattern = '(?i)\[(?:error|fatal)\]'
 color = "bold bright_red"
 
 [[rules]]
+name = "Debug messages"
 pattern = '(?i)\[debug\]'
 color = "bright_green"
 ```
@@ -197,11 +208,13 @@ Example ad-hoc rules (`rules.toml`):
 
 ```toml
 [[rules]]
+name = "Request identifier"
 pattern = "request_id="
 color = "bright_cyan"
 regex = false
 
 [[rules]]
+name = "Cache misses"
 pattern = "cache-miss"
 color = "orange3"
 regex = false

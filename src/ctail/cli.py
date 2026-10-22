@@ -36,6 +36,7 @@ class ColorRule:
     source: str = "built-in"
     disabled: bool = False
     source_index: int | None = None
+    name: str | None = None
 
 
 DEFAULT_RULES = (
@@ -61,9 +62,14 @@ def _parse_rules(
         if not isinstance(item, dict):
             raise TypeError(f"{source}: rule {index} must be a table")
         pattern = item.get("pattern")
+        name = item.get("name")
         builtin = item.get("builtin", False)
         disabled = item.get("disabled", False)
         regex_enabled = item.get("regex", True)
+        if name is not None and not isinstance(name, str):
+            raise TypeError(f"{source}: rule {index} 'name' must be a string")
+        if name == "":
+            raise ValueError(f"{source}: rule {index} needs a non-empty string 'name'")
         if not isinstance(pattern, str):
             raise TypeError(f"{source}: rule {index} 'pattern' must be a string")
         if not pattern:
@@ -95,6 +101,7 @@ def _parse_rules(
         parsed.append(ColorRule(
             pattern, color, compiled, regex_enabled,
             "built-in" if builtin else str(source), disabled, index - 1,
+            name=name,
         ))
     return parsed
 
@@ -155,7 +162,7 @@ def _list_colors(console: Console) -> None:
 
 def _show_rules(console: Console, rules: list[ColorRule]) -> None:
     table = Table(title="Coloring rules (highest priority first)")
-    for heading in ("Priority", "Source", "Status", "Mode", "Pattern", "Style"):
+    for heading in ("Priority", "Source", "Status", "Mode", "Name", "Pattern", "Style"):
         table.add_column(heading)
     for priority, rule in enumerate(rules, start=1):
         table.add_row(
@@ -163,6 +170,7 @@ def _show_rules(console: Console, rules: list[ColorRule]) -> None:
             Text(rule.source),
             "disabled" if rule.disabled else "enabled",
             "regex" if rule.regex_enabled else "literal",
+            rule.name or "-",
             Text(rule.pattern),
             Text(rule.color, style=rule.color),
         )
@@ -358,6 +366,8 @@ def _select_rule(
                 f"[{'disabled' if rule.disabled else 'enabled'}] {source} "
                 f"({'regex' if rule.regex_enabled else 'literal'}): "
             )
+            if rule.name:
+                row.append(f"{rule.name}: ")
             row.append(repr(rule.pattern), style=rule.color)
             row.append(f" ({rule.color})")
             row.truncate(max(1, console.size.width - 1), overflow="ellipsis")
