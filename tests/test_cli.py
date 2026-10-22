@@ -57,6 +57,17 @@ class ListingTests(unittest.TestCase):
                 self.assertTrue(set(ANSI_COLOR_NAMES) <= set(plain.splitlines()))
                 self.assertIn("default", plain.splitlines())
 
+    def test_help_lists_all_interactive_keys(self):
+        with (
+            redirect_stdout(io.StringIO()) as output,
+            patch("sys.argv", ["ctail", "--help"]),
+        ):
+            with self.assertRaises(SystemExit) as caught:
+                main()
+        self.assertEqual(caught.exception.code, 0)
+        for key in ("Space", "c", "r", "d", "?", "q"):
+            self.assertIn(key, output.getvalue())
+
     def test_rules_aliases_show_sources_modes_and_priority(self):
         self.write_rules()
         for option in ("-shr", "--show-rules"):

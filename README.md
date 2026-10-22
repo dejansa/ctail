@@ -45,7 +45,8 @@ Built-in rules color `[ERROR]`/`[FATAL]`, `[WARN]`/`[WARNING]`, `[INFO]`, and
 
 When following a file in an interactive terminal, press **Space** to
 pause/resume, **c** to add a literal text/color rule, **r** to remove a custom
-rule, **d** to enable/disable any rule, or **q** to quit. Rules
+rule, **d** to enable/disable any rule, **?** to show the interactive command
+list, or **q** to quit. The help panel closes when any key is pressed. Rules
 created with **c** are saved separately in
 `~/.config/ctail/rules.toml`, and take precedence over the main configuration.
 Use `--no-color` to disable colored output.
@@ -154,8 +155,9 @@ printf '%s\n' '2026-10-22 11:00:02 [DEBUG] example detail' >> /tmp/ctail-demo.lo
 
 While `ctail` is following the file, press **Space** to pause/resume, **c** to
 enter a literal string and Rich color for a persisted ad-hoc rule, **r** to
-remove a rule, **d** to enable/disable a rule, and **q** to quit. In the selectors,
-check arrow-key navigation, **Escape** cancellation, and **Enter** to apply;
+remove a rule, **d** to enable/disable a rule, **?** to open the help panel,
+and **q** to quit. In the selectors, check arrow-key navigation, **Escape**
+cancellation, and **Enter** to apply;
 restart the app or run `ctail --show-rules` to verify the saved state.
 Interactive keys are available when following a file in a terminal;
 they are not used when input is piped. Remove the sample file afterward with

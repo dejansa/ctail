@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from rich.console import Console
+from rich.table import Table
 
 from ctail import (
     DEFAULT_RULES,
@@ -345,6 +346,34 @@ class RuleManagementTests(unittest.TestCase):
         finally:
             os.close(read_fd)
 
+    def test_help_key_shows_panel_and_waits_for_any_dismissal_key(self):
+        read_fd, write_fd = os.pipe()
+        os.close(write_fd)
+        with (
+            patch("ctail.os.read", return_value=b"x") as read,
+            patch("ctail.Live") as live,
+        ):
+            from ctail import _show_interactive_help
+
+            _show_interactive_help(self.console, read_fd)
+        read.assert_called_once_with(read_fd, 1)
+        help_view = live.call_args.args[0]
+        help_output = io.StringIO()
+        Console(file=help_output, width=160, color_system=None).print(help_view)
+        self.assertIn("ctail interactive commands", help_output.getvalue())
+        self.assertIn("Press any key to return to tailing", help_output.getvalue())
+        self.assertEqual(len(help_view.renderables), 3)
+        self.assertIsInstance(help_view.renderables[1], Table)
+        lines = help_output.getvalue().splitlines()
+        self.assertTrue(lines[0].startswith("ctail interactive commands"))
+        table_start = next(i for i, line in enumerate(lines) if line.startswith("┏"))
+        table_end = next(i for i, line in enumerate(lines) if line.startswith("└"))
+        self.assertTrue(lines[table_start].startswith("┏"))
+        self.assertTrue(lines[table_end + 1].startswith("Press any key to return to tailing"))
+        for command in ("Pause or resume", "Add a literal", "remove a custom", "enable or disable", "Show this command list", "Quit ctail"):
+            self.assertIn(command, help_output.getvalue())
+        os.close(read_fd)
+
     def read_until(self, master_fd, marker):
         output = bytearray()
         deadline = time.monotonic() + 8
@@ -428,6 +457,18 @@ class RuleManagementTests(unittest.TestCase):
             os.write(master_fd, b"\x1b[B\r")
             self.read_until(master_fd, b"Deleted rule")
             self.assertNotIn("user", [rule.pattern for rule in self.load_rules()])
+
+    def test_pty_help_panel_dismissal_returns_to_live_tailing(self):
+        with self.running_app() as (master_fd, log_path):
+            os.write(master_fd, b"?")
+            panel = self.read_until(master_fd, b"Press any key to return to tailing")
+            self.assertIn(b"ctail interactive commands", panel)
+            self.assertIn(b"Pause or resume", panel)
+            self.assertIn(b"Show this command list", panel)
+            os.write(master_fd, b"x")
+            with log_path.open("a") as log:
+                log.write("[INFO] help dismissed\n")
+            self.read_until(master_fd, b"help dismissed")
 
 
 if __name__ == "__main__":

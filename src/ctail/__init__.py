@@ -16,7 +16,7 @@ from typing import Any
 
 import tomlkit
 from rich.color import ANSI_COLOR_NAMES, ColorParseError
-from rich.console import Console
+from rich.console import Console, Group
 from rich.errors import StyleSyntaxError
 from rich.live import Live
 from rich.style import Style
@@ -400,6 +400,28 @@ def _manage_rules(
     console.print(Text(f"{action} rule for {rule.pattern!r}.", style="dim"))
 
 
+def _show_interactive_help(console: Console, keyboard_fd: int) -> None:
+    commands = Table(show_header=True, header_style="bold")
+    commands.add_column("Key", style="cyan", no_wrap=True)
+    commands.add_column("Command")
+    commands.add_row("Space", "Pause or resume log output")
+    commands.add_row("c", "Add a literal color rule")
+    commands.add_row("r", "Select and remove a custom rule")
+    commands.add_row("d", "Select a rule and enable or disable it")
+    commands.add_row("?", "Show this command list")
+    commands.add_row("q", "Quit ctail")
+    help_view = Group(
+        Text("ctail interactive commands", style="bold"),
+        commands,
+        Text("Press any key to return to tailing", style="dim"),
+    )
+    with Live(
+        help_view, console=console, screen=True, transient=True,
+        auto_refresh=False, redirect_stdout=False, redirect_stderr=False,
+    ):
+        os.read(keyboard_fd, 1)
+
+
 def _consume_stream(
     source_fd: int,
     console: Console,
@@ -431,6 +453,8 @@ def _consume_stream(
                 _manage_rules(
                     console, rules, rules_path, keyboard_fd, delete=key in (b"r", b"R")
                 )
+            elif key == b"?":
+                _show_interactive_help(console, keyboard_fd)
             elif key in (b"q", b"Q"):
                 running = False
 
@@ -479,7 +503,17 @@ def _tail_process(arguments: list[str]) -> subprocess.Popen[bytes]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Tail logs and colorize matching parts of each line."
+        description="Tail logs and colorize matching parts of each line.",
+        epilog=(
+            "Interactive file-following keys (when stdin and stdout are terminals):\n"
+            "  Space  Pause or resume log output\n"
+            "  c      Add a literal color rule\n"
+            "  r      Select and remove a custom rule\n"
+            "  d      Select a rule and enable or disable it\n"
+            "  ?      Show the interactive command list\n"
+            "  q      Quit ctail"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--no-color",
@@ -530,7 +564,7 @@ def main() -> None:
             termios.tcsetattr(keyboard_fd, termios.TCSADRAIN, active_terminal)
             console.print(
                 "Space: pause/resume  c: add rule  r: remove rule  "
-                "d: enable/disable rule  q: quit", style="dim",
+                "d: enable/disable rule  ?: help  q: quit", style="dim",
             )
 
         _consume_stream(
