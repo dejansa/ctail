@@ -16,7 +16,7 @@ from unittest.mock import patch
 from rich.console import Console
 from rich.table import Table
 
-from ctail import (
+from ctail.cli import (
     DEFAULT_RULES,
     _add_rule,
     _change_rule,
@@ -235,8 +235,8 @@ class RuleManagementTests(unittest.TestCase):
         before = list(rules)
         data = self.rules_path.read_bytes()
         with (
-            patch("ctail._select_rule", return_value=rules[0]),
-            patch("ctail.os.replace", side_effect=OSError("write denied")),
+            patch("ctail.cli._select_rule", return_value=rules[0]),
+            patch("ctail.cli.os.replace", side_effect=OSError("write denied")),
         ):
             _manage_rules(self.console, rules, self.rules_path, 0, delete=True)
         self.assertEqual(rules, before)
@@ -248,11 +248,11 @@ class RuleManagementTests(unittest.TestCase):
     def test_management_updates_live_rules_only_after_successful_save(self):
         self.write_custom_rules()
         rules = self.load_rules()
-        with patch("ctail._select_rule", return_value=rules[0]):
+        with patch("ctail.cli._select_rule", return_value=rules[0]):
             _manage_rules(self.console, rules, self.rules_path, 0, delete=False)
         self.assertFalse(rules[0].disabled)
         self.assertIsNotNone(_render_line("literal", rules, False))
-        with patch("ctail._select_rule", return_value=rules[0]):
+        with patch("ctail.cli._select_rule", return_value=rules[0]):
             _manage_rules(self.console, rules, self.rules_path, 0, delete=True)
         self.assertIsNone(_render_line("literal", rules, False))
         self.assertEqual(rules, self.load_rules())
@@ -264,8 +264,8 @@ class RuleManagementTests(unittest.TestCase):
         terminal = [0, 0, 0, termios.ICANON | termios.ECHO, 0, 0, [0] * 32]
         with (
             patch("builtins.input", side_effect=["new", "bold white on red"]),
-            patch("ctail.termios.tcsetattr"),
-            patch("ctail.termios.tcgetattr", return_value=terminal),
+            patch("ctail.cli.termios.tcsetattr"),
+            patch("ctail.cli.termios.tcgetattr", return_value=terminal),
         ):
             _add_rule(self.console, rules, self.rules_path, 0, terminal)
         self.assertEqual(rules, self.load_rules())
@@ -302,7 +302,7 @@ class RuleManagementTests(unittest.TestCase):
     def test_selector_arrows_paging_and_enter(self):
         self.write_custom_rules()
         rules = self.load_rules()
-        with patch("ctail._read_rule_key", side_effect=[
+        with patch("ctail.cli._read_rule_key", side_effect=[
             "up", "down", "down", "down", "up", "enter",
         ]):
             chosen = _select_rule(self.console, rules, 0, delete=False)
@@ -311,7 +311,7 @@ class RuleManagementTests(unittest.TestCase):
     def test_delete_selector_excludes_builtins(self):
         self.write_custom_rules()
         rules = self.load_rules()
-        with patch("ctail._read_rule_key", side_effect=["down"] * 20 + ["enter"]):
+        with patch("ctail.cli._read_rule_key", side_effect=["down"] * 20 + ["enter"]):
             chosen = _select_rule(self.console, rules, 0, delete=True)
         self.assertEqual(chosen, rules[2])
         self.assertIsNone(_select_rule(self.console, rules[3:], 0, delete=True))
@@ -323,7 +323,7 @@ class RuleManagementTests(unittest.TestCase):
             rules = self.load_rules()
             before = list(rules)
             contents = [path.read_bytes() for path in (self.rules_path, self.config_path)]
-            with patch("ctail._read_rule_key", return_value="cancel"):
+            with patch("ctail.cli._read_rule_key", return_value="cancel"):
                 _manage_rules(self.console, rules, self.rules_path, 0, delete=delete)
             self.assertEqual(rules, before)
             self.assertEqual(contents, [
@@ -351,9 +351,9 @@ class RuleManagementTests(unittest.TestCase):
         os.close(write_fd)
         try:
             with (
-                patch("ctail.select.select", return_value=([99], [], [])),
-                patch("ctail.os.read", side_effect=[b"r", b"D", b"q"]),
-                patch("ctail._manage_rules") as manage,
+                patch("ctail.cli.select.select", return_value=([99], [], [])),
+                patch("ctail.cli.os.read", side_effect=[b"r", b"D", b"q"]),
+                patch("ctail.cli._manage_rules") as manage,
             ):
                 _consume_stream(
                     read_fd, self.console, self.load_rules(), False, 99, self.rules_path
@@ -368,10 +368,10 @@ class RuleManagementTests(unittest.TestCase):
         read_fd, write_fd = os.pipe()
         os.close(write_fd)
         with (
-            patch("ctail.os.read", return_value=b"x") as read,
-            patch("ctail.Live") as live,
+            patch("ctail.cli.os.read", return_value=b"x") as read,
+            patch("ctail.cli.Live") as live,
         ):
-            from ctail import _show_interactive_help
+            from ctail.cli import _show_interactive_help
 
             _show_interactive_help(self.console, read_fd)
         read.assert_called_once_with(read_fd, 1)
@@ -411,7 +411,7 @@ class RuleManagementTests(unittest.TestCase):
         master_fd, slave_fd = pty.openpty()
         original_terminal = termios.tcgetattr(slave_fd)
         process = subprocess.Popen(
-            [sys.executable, "-c", "from ctail import main; main()", "-f", str(log_path)],
+            [sys.executable, "-c", "from ctail.cli import main; main()", "-f", str(log_path)],
             stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
             env=dict(os.environ, HOME=str(self.home), TERM="xterm-256color"),
         )

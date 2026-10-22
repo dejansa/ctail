@@ -9,7 +9,7 @@ from unittest.mock import patch
 from rich.color import ANSI_COLOR_NAMES
 from rich.console import Console
 
-from ctail import DEFAULT_RULES, _load_settings, _render_line, main
+from ctail.cli import DEFAULT_RULES, _load_settings, _render_line, main
 
 
 class ListingTests(unittest.TestCase):
@@ -24,15 +24,15 @@ class ListingTests(unittest.TestCase):
             redirect_stdout(output),
             patch.object(output, "isatty", return_value=terminal),
             patch("sys.argv", ["ctail", *arguments]),
-            patch("ctail._config_directory", return_value=self.config_dir),
+            patch("ctail.cli._config_directory", return_value=self.config_dir),
             patch(
-                "ctail.Console",
+                "ctail.cli.Console",
                 side_effect=lambda **kwargs: Console(
                     file=output, force_terminal=True, width=240, **kwargs
                 ),
             ),
-            patch("ctail._tail_process") as tail,
-            patch("ctail._consume_stream") as consume,
+            patch("ctail.cli._tail_process") as tail,
+            patch("ctail.cli._consume_stream") as consume,
         ):
             main()
         tail.assert_not_called()
