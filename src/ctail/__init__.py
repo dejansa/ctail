@@ -54,32 +54,36 @@ def _parse_rules(
     data: Any, source: Path, *, allow_builtins: bool = False
 ) -> list[ColorRule]:
     if not isinstance(data, list):
-        raise ValueError(f"{source}: 'rules' must be an array of tables")
+        raise TypeError(f"{source}: 'rules' must be an array of tables")
 
     parsed: list[ColorRule] = []
     for index, item in enumerate(data, start=1):
         if not isinstance(item, dict):
-            raise ValueError(f"{source}: rule {index} must be a table")
+            raise TypeError(f"{source}: rule {index} must be a table")
         pattern = item.get("pattern")
         builtin = item.get("builtin", False)
         disabled = item.get("disabled", False)
         regex_enabled = item.get("regex", True)
-        if not isinstance(pattern, str) or not pattern:
+        if not isinstance(pattern, str):
+            raise TypeError(f"{source}: rule {index} 'pattern' must be a string")
+        if not pattern:
             raise ValueError(f"{source}: rule {index} needs a non-empty string 'pattern'")
         if not isinstance(builtin, bool):
-            raise ValueError(f"{source}: rule {index} 'builtin' must be true or false")
+            raise TypeError(f"{source}: rule {index} 'builtin' must be true or false")
         if builtin and (not allow_builtins or pattern not in dict(DEFAULT_RULES)):
             raise ValueError(
                 f"{source}: rule {index} must reference a known built-in "
                 "pattern in ctail.toml"
             )
         color = item.get("color", dict(DEFAULT_RULES).get(pattern) if builtin else None)
-        if not isinstance(color, str) or not color:
+        if not isinstance(color, str):
+            raise TypeError(f"{source}: rule {index} 'color' must be a string")
+        if not color:
             raise ValueError(f"{source}: rule {index} needs a non-empty string 'color'")
         if not isinstance(disabled, bool):
-            raise ValueError(f"{source}: rule {index} 'disabled' must be true or false")
+            raise TypeError(f"{source}: rule {index} 'disabled' must be true or false")
         if not isinstance(regex_enabled, bool):
-            raise ValueError(f"{source}: rule {index} 'regex' must be true or false")
+            raise TypeError(f"{source}: rule {index} 'regex' must be true or false")
         if builtin and not regex_enabled:
             raise ValueError(f"{source}: rule {index}: built-in patterns must use regex")
         try:
@@ -102,7 +106,7 @@ def _read_toml(path: Path) -> dict[str, Any]:
     except tomllib.TOMLDecodeError as error:
         raise ValueError(f"{path}: invalid TOML: {error}") from error
     if not isinstance(data, dict):
-        raise ValueError(f"{path}: expected TOML tables")
+        raise TypeError(f"{path}: expected TOML tables")
     return data
 
 
@@ -116,7 +120,7 @@ def _load_settings(config_dir: Path) -> tuple[bool, list[ColorRule], Path]:
         config = _read_toml(config_path)
         show_unmatched = config.get("show_unmatched", False)
         if not isinstance(show_unmatched, bool):
-            raise ValueError(f"{config_path}: 'show_unmatched' must be true or false")
+            raise TypeError(f"{config_path}: 'show_unmatched' must be true or false")
         configured_rules = _parse_rules(
             config.get("rules", []), config_path, allow_builtins=True
         )
@@ -216,7 +220,7 @@ def _read_rule_document(path: Path) -> tuple[TOMLDocument, AoT | Array]:
         document["rules"] = tomlkit.aot()
     entries = document["rules"]
     if not isinstance(entries, (AoT, Array)):
-        raise ValueError(f"{path}: 'rules' must be an array of tables")
+        raise TypeError(f"{path}: 'rules' must be an array of tables")
     return document, entries
 
 
@@ -296,7 +300,7 @@ def _add_rule(
             Style.parse(color)
             _write_ad_hoc_rule(rules_path, pattern, color)
             _, loaded_rules, _ = _load_settings(rules_path.parent)
-        except (ColorParseError, StyleSyntaxError, OSError, ValueError) as error:
+        except (ColorParseError, StyleSyntaxError, OSError, TypeError, ValueError) as error:
             console.print(f"Could not add color rule: {error}", style="bold red")
             return
         rules[:] = loaded_rules
@@ -392,7 +396,7 @@ def _manage_rules(
     try:
         _change_rule(rule, rules_path, delete=delete)
         _, loaded_rules, _ = _load_settings(rules_path.parent)
-    except (OSError, ValueError) as error:
+    except (OSError, TypeError, ValueError) as error:
         console.print(Text(f"Could not change color rule: {error}", style="bold red"))
         return
     rules[:] = loaded_rules
@@ -576,7 +580,7 @@ def main() -> None:
             rules_path if keyboard_fd is not None else None,
             original_terminal,
         )
-    except (OSError, RuntimeError, ValueError, tomllib.TOMLDecodeError) as error:
+    except (OSError, RuntimeError, TypeError, ValueError, tomllib.TOMLDecodeError) as error:
         parser.exit(2, f"ctail: error: {error}\n")
     finally:
         if keyboard_fd is not None and original_terminal is not None:

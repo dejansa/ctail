@@ -21,5 +21,7 @@
 - Run `uv sync` to install project dependencies into `.venv`.
 - Run the CLI with `uv run ctail`; use the manual smoke and interactive
   instructions in [README.md](README.md) when validating CLI behavior.
+- Run `uv run ruff check .` for linting; use `uv run ruff check --fix .` to
+  apply Ruff's safe automatic fixes, then rerun the check.
 - Keep changes focused, preserve the Bash version's tailing behavior, and
   update the README when usage or configuration changes.

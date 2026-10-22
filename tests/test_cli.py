@@ -103,6 +103,14 @@ class ListingTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 2)
         self.assertIn("invalid TOML", errors.getvalue())
 
+    def test_rule_listing_reports_invalid_configuration_types(self):
+        (self.config_dir / "ctail.toml").write_text("show_unmatched = 'yes'")
+        with patch("sys.stderr", new_callable=io.StringIO) as errors:
+            with self.assertRaises(SystemExit) as caught:
+                self.invoke("--show-rules")
+        self.assertEqual(caught.exception.code, 2)
+        self.assertIn("'show_unmatched' must be true or false", errors.getvalue())
+
     def test_redirected_listings_are_plain(self):
         output = self.invoke("-lsc", "-shr", terminal=False)
         self.assertNotIn("\x1b[", output)

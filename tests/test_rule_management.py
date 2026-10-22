@@ -63,12 +63,17 @@ class RuleManagementTests(unittest.TestCase):
     def test_disabled_must_be_boolean(self):
         for value in ("true", 1, None):
             with self.subTest(value=value), self.assertRaisesRegex(
-                ValueError, "'disabled' must be true or false"
+                TypeError, "'disabled' must be true or false"
             ):
                 _parse_rules(
                     [{"pattern": "x", "color": "red", "disabled": value}],
                     self.rules_path,
                 )
+
+    def test_invalid_rule_types_raise_type_error(self):
+        for data in ("not a rules array", ["not a rule table"]):
+            with self.subTest(data=data), self.assertRaises(TypeError):
+                _parse_rules(data, self.rules_path)
 
     def test_disabled_rules_do_not_match_or_trigger_empty_match_errors(self):
         rules = _parse_rules(
@@ -180,15 +185,28 @@ class RuleManagementTests(unittest.TestCase):
         self.assertEqual(len(rules), len(DEFAULT_RULES) + 4)
 
     def test_invalid_builtin_overrides_are_rejected(self):
-        for contents in (
-            '[[rules]]\nbuiltin = true\npattern = "unknown"\ndisabled = true\n',
-            '[[rules]]\nbuiltin = "true"\npattern = "x"\ncolor = "red"\n',
-            f"[[rules]]\nbuiltin = true\npattern = '{DEFAULT_RULES[0][0]}'\nregex = false\n",
-            2 * f"[[rules]]\nbuiltin = true\npattern = '{DEFAULT_RULES[0][0]}'\n",
-        ):
+        invalid_overrides = (
+            (
+                '[[rules]]\nbuiltin = true\npattern = "unknown"\ndisabled = true\n',
+                ValueError,
+            ),
+            (
+                '[[rules]]\nbuiltin = "true"\npattern = "x"\ncolor = "red"\n',
+                TypeError,
+            ),
+            (
+                f"[[rules]]\nbuiltin = true\npattern = '{DEFAULT_RULES[0][0]}'\nregex = false\n",
+                ValueError,
+            ),
+            (
+                2 * f"[[rules]]\nbuiltin = true\npattern = '{DEFAULT_RULES[0][0]}'\n",
+                ValueError,
+            ),
+        )
+        for contents, exception in invalid_overrides:
             with self.subTest(contents=contents):
                 self.config_path.write_text(contents)
-                with self.assertRaises(ValueError):
+                with self.assertRaises(exception):
                     self.load_rules()
         self.config_path.unlink()
         self.rules_path.write_text(
