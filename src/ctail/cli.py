@@ -213,6 +213,20 @@ def _read_toml(path: Path) -> dict[str, Any]:
     return data
 
 
+def _configured_active_profile(data: dict[str, Any], source: Path) -> str | None:
+    profile = data.get("active_profile")
+    if profile is not None and (not isinstance(profile, str) or not profile):
+        raise TypeError(f"{source}: 'active_profile' must be a non-empty string")
+    return profile
+
+
+def _read_active_profile(config_path: Path) -> str | None:
+    if not config_path.exists():
+        return None
+    config = _read_toml(config_path)
+    return _configured_active_profile(config, config_path)
+
+
 def _load_settings(
     config_dir: Path, profile: str | None = None
 ) -> tuple[bool, list[ColorRule], Path]:
@@ -427,9 +441,14 @@ def _save_rule_document(path: Path, document: TOMLDocument) -> None:
         document.unwrap().get("rules", []), path,
         allow_builtins=path.name == "ctail.toml",
     )
-    _parse_rule_profiles(
+    profiles = _parse_rule_profiles(
         document.unwrap(), path, allow_builtins=path.name == "ctail.toml"
     )
+    active_profile = _configured_active_profile(document.unwrap(), path)
+    if active_profile is not None and active_profile not in profiles:
+        raise ValueError(
+            f"{path}: active profile {active_profile!r} is not configured"
+        )
     path = path.resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     mode = path.stat().st_mode & 0o777 if path.exists() else 0o600
@@ -447,6 +466,46 @@ def _save_rule_document(path: Path, document: TOMLDocument) -> None:
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
+
+
+def _write_active_profile(path: Path, profile_name: str | None) -> None:
+    if path.exists():
+        try:
+            document = tomlkit.parse(path.read_text(encoding="utf-8"))
+        except ParseError as error:
+            raise ValueError(f"{path}: invalid TOML: {error}") from error
+    else:
+        document = tomlkit.document()
+
+    _configured_active_profile(document.unwrap(), path)
+    if profile_name is None:
+        document.pop("active_profile", None)
+    else:
+        document["active_profile"] = profile_name
+    _save_rule_document(path, document)
+
+
+def _write_profile(path: Path, profile_name: str) -> None:
+    if not profile_name:
+        raise ValueError("profile name must not be empty")
+    if path.exists():
+        try:
+            document = tomlkit.parse(path.read_text(encoding="utf-8"))
+        except ParseError as error:
+            raise ValueError(f"{path}: invalid TOML: {error}") from error
+    else:
+        document = tomlkit.document()
+
+    data = document.unwrap()
+    _parse_rules(data.get("rules", []), path, allow_builtins=True)
+    profiles = _parse_rule_profiles(data, path, allow_builtins=True)
+    if profile_name in profiles:
+        raise ValueError(f"{path}: profile {profile_name!r} already exists")
+
+    if "profiles" not in document:
+        document["profiles"] = tomlkit.table()
+    document["profiles"][profile_name] = tomlkit.table()
+    _save_rule_document(path, document)
 
 
 def _write_ad_hoc_rule(
@@ -548,7 +607,143 @@ def _read_rule_key(keyboard_fd: int) -> str:
         return "cancel"
     if key in (b"\r", b"\n"):
         return "enter"
-    return "cancel" if not key else ""
+    return "cancel" if not key else key.decode("utf-8", errors="replace")
+
+
+def _select_profile(
+    console: Console,
+    config_path: Path,
+    keyboard_fd: int,
+    active_profile: str | None = None,
+) -> tuple[bool, str | None] | None:
+    config = _read_toml(config_path) if config_path.exists() else {}
+    choices: list[str | None] = [None, *sorted(
+        _parse_rule_profiles(config, config_path, allow_builtins=True)
+    )]
+    selected = 0
+
+    def render() -> Group:
+        table = Table(title="Select profile", show_header=False, box=None)
+        table.add_column("Profile")
+        page_size = max(1, console.size.height - 8)
+        start = (selected // page_size) * page_size
+        for index in range(start, min(start + page_size, len(choices))):
+            name = "(default)" if choices[index] is None else choices[index]
+            row = Text(name)
+            if choices[index] == active_profile:
+                row.append(" (active)", style="bold green")
+            if index == selected:
+                row.stylize("reverse")
+            table.add_row(row)
+        return Group(
+            table,
+            Text("n  Add a new profile", style="dim"),
+            Text("Up/Down: select  Enter: apply  Escape: cancel", style="dim"),
+            Text(f"{selected + 1}/{len(choices)}", style="dim"),
+        )
+
+    with Live(
+        render(), console=console, screen=True, transient=True,
+        auto_refresh=False, redirect_stdout=False, redirect_stderr=False,
+    ) as live:
+        while True:
+            key = _read_rule_key(keyboard_fd)
+            if key == "cancel":
+                return None
+            if key == "enter":
+                return False, choices[selected]
+            if key in ("n", "N"):
+                return True, None
+            if key == "up":
+                selected = max(0, selected - 1)
+            elif key == "down":
+                selected = min(len(choices) - 1, selected + 1)
+            live.update(render(), refresh=True)
+
+
+def _prompt_profile_name(
+    console: Console,
+    keyboard_fd: int,
+    original_terminal: list[Any],
+) -> str | None:
+    termios.tcsetattr(keyboard_fd, termios.TCSADRAIN, original_terminal)
+    try:
+        name = input("New profile name (blank cancels): ").strip()
+        return name or None
+    except EOFError:
+        console.print("Canceled.", style="dim")
+        return None
+    finally:
+        active = termios.tcgetattr(keyboard_fd)
+        active[3] &= ~(termios.ICANON | termios.ECHO)
+        active[6][termios.VMIN] = 1
+        active[6][termios.VTIME] = 0
+        termios.tcsetattr(keyboard_fd, termios.TCSADRAIN, active)
+
+
+def _manage_profiles(
+    console: Console,
+    rules: list[ColorRule],
+    rules_path: Path,
+    keyboard_fd: int,
+    original_terminal: list[Any],
+    profile: str | None,
+) -> str | None:
+    config_path = rules_path.with_name("ctail.toml")
+    while True:
+        try:
+            selection = _select_profile(
+                console, config_path, keyboard_fd, profile
+            )
+        except (OSError, TypeError, ValueError) as error:
+            console.print(f"Could not list profiles: {error}", style="bold red")
+            return profile
+        if selection is None:
+            return profile
+
+        add_new, selected_profile = selection
+        if add_new:
+            name = _prompt_profile_name(console, keyboard_fd, original_terminal)
+            if name is None:
+                console.print("Canceled.", style="dim")
+                continue
+            try:
+                _write_profile(config_path, name)
+            except (OSError, TypeError, ValueError) as error:
+                console.print(f"Could not add profile: {error}", style="bold red")
+                continue
+            try:
+                _, loaded_rules, _ = _load_settings(rules_path.parent, name)
+            except (OSError, TypeError, ValueError) as error:
+                console.print(
+                    f"Profile {name!r} was saved but could not be activated: {error}",
+                    style="bold red",
+                )
+                return profile
+            try:
+                _write_active_profile(config_path, name)
+            except (OSError, TypeError, ValueError) as error:
+                console.print(
+                    f"Profile {name!r} was created but could not be activated: {error}",
+                    style="bold red",
+                )
+                return profile
+            rules[:] = loaded_rules
+            console.print(f"Added and selected profile {name!r}.", style="dim")
+            return name
+
+        try:
+            _, loaded_rules, _ = _load_settings(
+                rules_path.parent, selected_profile
+            )
+            _write_active_profile(config_path, selected_profile)
+        except (OSError, TypeError, ValueError) as error:
+            console.print(f"Could not select profile: {error}", style="bold red")
+            return profile
+        rules[:] = loaded_rules
+        label = selected_profile if selected_profile is not None else "(default)"
+        console.print(f"Selected profile {label!r}.", style="dim")
+        return selected_profile
 
 
 def _select_rule(
@@ -630,6 +825,7 @@ def _show_interactive_help(console: Console, keyboard_fd: int) -> None:
     commands = Table(show_header=True, header_style="bold")
     commands.add_column("Key", style="cyan", no_wrap=True)
     commands.add_column("Command")
+    commands.add_row("p", "Select a coloring-rule profile")
     commands.add_row("Space", "Pause or resume log output")
     commands.add_row("c", "Add a literal color rule")
     commands.add_row("f", "Toggle display of unmatched lines")
@@ -662,6 +858,7 @@ def _consume_stream(
     buffer = bytearray()
     paused = False
     running = True
+    active_profile = profile
     while running:
         read_fds = [source_fd] if not paused else []
         if keyboard_fd is not None:
@@ -672,21 +869,29 @@ def _consume_stream(
 
         if keyboard_fd is not None and keyboard_fd in ready:
             key = os.read(keyboard_fd, 1)
-            if key == b" ":
+            if key in (b"\r", b"\n"):
+                console.print()
+            elif key == b" ":
                 paused = not paused
                 console.print("Paused." if paused else "Resumed.", style="dim")
+            elif key in (b"p", b"P") and rules_path is not None and original_terminal is not None:
+                active_profile = _manage_profiles(
+                    console, rules, rules_path, keyboard_fd, original_terminal,
+                    active_profile,
+                )
             elif key in (b"f", b"F"):
                 show_unmatched = not show_unmatched
                 state = "shown" if show_unmatched else "hidden"
                 console.print(f"Unmatched lines {state}.", style="dim")
             elif key in (b"c", b"C") and rules_path is not None and original_terminal is not None:
                 _add_rule(
-                    console, rules, rules_path, keyboard_fd, original_terminal, profile
+                    console, rules, rules_path, keyboard_fd, original_terminal,
+                    active_profile,
                 )
             elif key in (b"r", b"R", b"d", b"D") and rules_path is not None:
                 _manage_rules(
                     console, rules, rules_path, keyboard_fd,
-                    delete=key in (b"r", b"R"), profile=profile,
+                    delete=key in (b"r", b"R"), profile=active_profile,
                 )
             elif key == b"?":
                 _show_interactive_help(console, keyboard_fd)
@@ -819,7 +1024,9 @@ def main() -> None:
         description="Colorize log output and either tail it or page through it.",
         epilog=(
             "Interactive file-following keys (when stdin and stdout are terminals):\n"
+            "  Enter  Print a blank line to separate log output\n"
             "  Space  Pause or resume log output\n"
+            "  p      Select a coloring-rule profile (n adds one)\n"
             "  c      Add a literal color rule\n"
             "  r      Select and remove a custom rule\n"
             "  d      Select a rule and enable or disable it\n"
@@ -877,9 +1084,17 @@ def main() -> None:
             _list_profiles(console, config_dir / "ctail.toml")
             if not options.show_rules:
                 return
-        show_unmatched, rules, rules_path = _load_settings(config_dir, options.profile)
+        config_path = config_dir / "ctail.toml"
+        active_profile = (
+            options.profile
+            if options.profile is not None
+            else _read_active_profile(config_path)
+        )
+        show_unmatched, rules, rules_path = _load_settings(config_dir, active_profile)
+        if options.profile is not None and not options.show_rules:
+            _write_active_profile(config_path, active_profile)
         if options.show_rules:
-            _show_rules(console, rules, options.profile)
+            _show_rules(console, rules, active_profile)
             return
         if options.less:
             _show_with_less(tail_arguments, console, rules, show_unmatched)
@@ -899,7 +1114,7 @@ def main() -> None:
             active_terminal[6][termios.VTIME] = 0
             termios.tcsetattr(keyboard_fd, termios.TCSADRAIN, active_terminal)
             console.print(
-                "Space: pause/resume  c: add rule  r: remove rule  "
+                "Enter: blank line  Space: pause/resume  p: profile  c: add rule  r: remove rule  "
                 "d: enable/disable rule  ?: help  q: quit", style="dim",
             )
 
@@ -911,7 +1126,7 @@ def main() -> None:
             keyboard_fd,
             rules_path if keyboard_fd is not None else None,
             original_terminal,
-            options.profile,
+            active_profile,
         )
     except (OSError, RuntimeError, TypeError, ValueError, tomllib.TOMLDecodeError) as error:
         parser.exit(2, f"ctail: error: {error}\n")

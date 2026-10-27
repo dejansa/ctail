@@ -44,11 +44,13 @@ by default, as in the original Bash script. Set `show_unmatched = true` to
 display them.
 
 Use `--profile NAME` (or `-p NAME`) to select a named set of rules for a
-particular log format. Define profiles in `~/.config/ctail/ctail.toml`; without
-the option, the top-level rules in that file are used. Selecting a profile
-replaces those top-level rules. Built-in rules and top-level rules in
-`rules.toml` remain active. Temporary rules can also be grouped under matching
-`[profiles.NAME]` sections in `rules.toml`.
+particular log format. Define profiles in `~/.config/ctail/ctail.toml`.
+Selecting a profile saves `active_profile = "NAME"` in that file; subsequent
+runs use the saved profile unless another `--profile` is supplied. Without a
+saved or explicit profile, the top-level rules in `ctail.toml` are used.
+Selecting a profile replaces those top-level rules. Built-in rules and
+top-level rules in `rules.toml` remain active. Temporary rules can also be
+grouped under matching `[profiles.NAME]` sections in `rules.toml`.
 
 ```toml
 show_unmatched = true
@@ -103,14 +105,24 @@ Built-in rules color `[ERROR]`/`[FATAL]`, `[WARN]`/`[WARNING]`, `[INFO]`, and
 `[DEBUG]` (case-insensitively). Custom rules take precedence over built-ins.
 
 When following a file in an interactive terminal, press **Space** to
-pause/resume, **f** to toggle whether unmatched lines are shown, **c** to add a
-literal text/color rule, **r** to remove a custom rule, **d** to enable/disable
-any rule, **?** to show the interactive command list, or **q** to quit. The
+pause/resume, **Enter** to print a blank line and visually separate log output,
+**p** to select a coloring-rule profile, **f** to toggle whether unmatched
+lines are shown, **c** to add a literal text/color rule, **r** to remove a
+custom rule, **d** to enable/disable any rule, **?** to show the interactive
+command list, or **q** to quit. The
 **f** toggle applies only to the current run; it does not change
 `ctail.toml`. The help panel closes when any key is pressed. Rules created
 with **c** are saved in `~/.config/ctail/rules.toml`. With no active profile
 they are shared; when a profile is active they are saved to that profile and
 apply only to it.
+
+Press **p** to open the profile selector. **(default)** is the first option;
+use **Up/Down** and **Enter** to select a profile, or **Escape** to cancel.
+The **n** action shown below the profile list prompts for a name, saves a new
+empty profile in `ctail.toml`, and activates it as the saved profile. Selecting
+**(default)** removes `active_profile` from the configuration. Adding a rule
+with **c** while a named profile is active stores the rule under that profile
+in `rules.toml`; with **(default)** active, new ad-hoc rules remain shared.
 Use `--no-color` to disable colored output.
 
 ## Listing colors and rules
@@ -300,9 +312,10 @@ regex = false
 These sample ad-hoc rules match literal text. Rules added interactively are
 also saved as literal matches in `rules.toml`. Top-level `[[rules]]` entries
 are shared by every profile; rules under `[profiles.NAME]` apply only to the
-matching profile in `ctail.toml`. Interactive rules are saved to the active
-profile when one is selected, and as shared rules otherwise. Select a profile
-explicitly, for example:
+matching profile in `ctail.toml`. Interactive rules are saved under the active named profile, and as shared rules
+when no profile is active. The active profile is persistent, so after selecting
+it once you can start ctail without `--profile`. To change it for a run and
+persist that change, supply a different profile explicitly:
 
 ```sh
 ctail --profile nginx -f /var/log/nginx/access.log

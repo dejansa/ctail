@@ -14,8 +14,14 @@ from ctail.cli import (
     DEFAULT_RULES,
     _consume_stream,
     _load_settings,
+    _manage_profiles,
     _parse_rules,
+    _read_active_profile,
+    _read_rule_key,
     _render_line,
+    _select_profile,
+    _write_active_profile,
+    _write_profile,
     main,
 )
 
@@ -73,7 +79,7 @@ class ListingTests(unittest.TestCase):
             with self.assertRaises(SystemExit) as caught:
                 main()
         self.assertEqual(caught.exception.code, 0)
-        for key in ("Space", "c", "f", "r", "d", "?", "q"):
+        for key in ("Enter", "Space", "p", "n", "c", "f", "r", "d", "?", "q"):
             self.assertIn(key, output.getvalue())
 
     def test_rules_aliases_show_sources_modes_and_priority(self):
@@ -198,6 +204,68 @@ class ListingTests(unittest.TestCase):
         self.assertNotIn("shared-only", output)
         self.assertNotIn(DEFAULT_RULES[0][0], output)
 
+    def test_saved_active_profile_is_used_when_no_profile_is_specified(self):
+        (self.config_dir / "ctail.toml").write_text(
+            'active_profile = "nginx"\n'
+            "[profiles.nginx]\n"
+            "[[profiles.nginx.rules]]\n"
+            'pattern = "nginx-only"\n'
+            'color = "green"\n'
+        )
+
+        output = self.invoke("--show-rules", "--no-color")
+
+        self.assertIn("Coloring rules for profile 'nginx'", output)
+        self.assertIn("nginx-only", output)
+
+    def test_profile_argument_is_persisted_for_normal_run(self):
+        config_path = self.config_dir / "ctail.toml"
+        config_path.write_text("[profiles.nginx]\n")
+        output = io.StringIO()
+
+        class InputStream:
+            def __init__(self):
+                self.buffer = self
+
+            @staticmethod
+            def fileno():
+                return 12
+
+            @staticmethod
+            def isatty():
+                return False
+
+        input_stream = InputStream()
+        with (
+            redirect_stdout(output),
+            patch.object(output, "isatty", return_value=False),
+            patch("sys.stdin", input_stream),
+            patch("sys.argv", ["ctail", "-p", "nginx"]),
+            patch("ctail.cli._config_directory", return_value=self.config_dir),
+            patch(
+                "ctail.cli.Console",
+                side_effect=lambda **kwargs: Console(
+                    file=output, force_terminal=True, width=240, **kwargs
+                ),
+            ),
+            patch("ctail.cli._consume_stream") as consume,
+        ):
+            main()
+
+        consume.assert_called_once()
+        self.assertEqual(_read_active_profile(config_path), "nginx")
+
+    def test_writing_default_active_profile_clears_saved_selection(self):
+        config_path = self.config_dir / "ctail.toml"
+        config_path.write_text(
+            'active_profile = "nginx"\n[profiles.nginx]\n'
+        )
+
+        _write_active_profile(config_path, None)
+
+        self.assertIsNone(_read_active_profile(config_path))
+        self.assertNotIn("active_profile", config_path.read_text())
+
     def test_list_profiles_alias_and_long_option(self):
         (self.config_dir / "ctail.toml").write_text(
             "[profiles.http-access]\n"
@@ -217,6 +285,140 @@ class ListingTests(unittest.TestCase):
         output = self.invoke("--list-profiles", "--no-color")
 
         self.assertIn("No named profiles configured.", output)
+
+    def test_write_profile_preserves_existing_configuration(self):
+        config_path = self.config_dir / "ctail.toml"
+        original = "# Keep this comment.\nshow_unmatched = true\n\n[profiles.existing]\n"
+        config_path.write_text(original)
+
+        _write_profile(config_path, "new profile")
+
+        updated = config_path.read_text()
+        self.assertIn("# Keep this comment.", updated)
+        self.assertIn("[profiles.existing]", updated)
+        self.assertIn('[profiles."new profile"]', updated)
+        _, rules, _ = _load_settings(self.config_dir, "new profile")
+        self.assertEqual([rule.pattern for rule in rules], [
+            pattern for pattern, _ in DEFAULT_RULES
+        ])
+
+    def test_write_profile_rejects_duplicate_name_without_changing_file(self):
+        config_path = self.config_dir / "ctail.toml"
+        original = "[profiles.existing]\n"
+        config_path.write_text(original)
+
+        with self.assertRaisesRegex(ValueError, "already exists"):
+            _write_profile(config_path, "existing")
+
+        self.assertEqual(config_path.read_text(), original)
+
+    def test_profile_selector_starts_at_default_and_n_adds_profile(self):
+        config_path = self.config_dir / "ctail.toml"
+        config_path.write_text("[profiles.alpha]\n[profiles.beta]\n")
+        console = Console(file=io.StringIO(), no_color=True)
+
+        with (
+            patch("ctail.cli.Live"),
+            patch("ctail.cli._read_rule_key", return_value="enter"),
+        ):
+            self.assertEqual(
+                _select_profile(console, config_path, 11),
+                (False, None),
+            )
+        with (
+            patch("ctail.cli.Live"),
+            patch("ctail.cli._read_rule_key", side_effect=["down", "down", "enter"]),
+        ):
+            self.assertEqual(
+                _select_profile(console, config_path, 11),
+                (False, "beta"),
+            )
+        with (
+            patch("ctail.cli.Live"),
+            patch("ctail.cli._read_rule_key", return_value="n"),
+        ):
+            self.assertEqual(_select_profile(console, config_path, 11), (True, None))
+        with patch("ctail.cli.os.read", return_value=b"n"):
+            self.assertEqual(_read_rule_key(11), "n")
+
+    def test_profile_selector_marks_the_active_profile(self):
+        config_path = self.config_dir / "ctail.toml"
+        config_path.write_text("[profiles.alpha]\n")
+        output = io.StringIO()
+        console = Console(file=output, no_color=True, width=80)
+
+        with (
+            patch("ctail.cli.Live") as live,
+            patch("ctail.cli._read_rule_key", return_value="enter"),
+        ):
+            _select_profile(console, config_path, 11, active_profile="alpha")
+
+        console.print(live.call_args.args[0])
+        self.assertIn("alpha (active)", output.getvalue())
+
+    def test_escape_from_profile_selector_is_silent(self):
+        rules_path = self.config_dir / "rules.toml"
+        rules_path.write_text("")
+        output = io.StringIO()
+        console = Console(file=output, no_color=True)
+        terminal_state = [0, 0, 0, 0, 0, 0, [0] * 8]
+
+        with patch("ctail.cli._select_profile", return_value=None):
+            selected = _manage_profiles(
+                console, [], rules_path, 11, terminal_state, "nginx"
+            )
+
+        self.assertEqual(selected, "nginx")
+        self.assertNotIn("Canceled", output.getvalue())
+
+    def test_add_profile_key_saves_and_activates_new_profile(self):
+        rules_path = self.config_dir / "rules.toml"
+        rules_path.write_text("")
+        console = Console(file=io.StringIO(), no_color=True)
+        terminal_state = [0, 0, 0, 0, 0, 0, [0] * 8]
+        rules = []
+
+        with (
+            patch("ctail.cli.Live"),
+            patch("ctail.cli._read_rule_key", return_value="n"),
+            patch("builtins.input", return_value="new-profile"),
+            patch("ctail.cli.termios.tcsetattr"),
+            patch("ctail.cli.termios.tcgetattr", return_value=terminal_state),
+        ):
+            selected = _manage_profiles(
+                console, rules, rules_path, 11, terminal_state, None
+            )
+
+        self.assertEqual(selected, "new-profile")
+        config_text = (self.config_dir / "ctail.toml").read_text()
+        self.assertIn("[profiles.new-profile]", config_text)
+        self.assertIn('active_profile = "new-profile"', config_text)
+        self.assertEqual([rule.pattern for rule in rules], [
+            pattern for pattern, _ in DEFAULT_RULES
+        ])
+
+    def test_selecting_profile_persists_it_and_default_clears_it(self):
+        config_path = self.config_dir / "ctail.toml"
+        config_path.write_text("[profiles.nginx]\n")
+        rules_path = self.config_dir / "rules.toml"
+        rules_path.write_text("")
+        console = Console(file=io.StringIO(), no_color=True)
+        terminal_state = [0, 0, 0, 0, 0, 0, [0] * 8]
+        rules = []
+
+        with patch("ctail.cli._select_profile", return_value=(False, "nginx")):
+            selected = _manage_profiles(
+                console, rules, rules_path, 11, terminal_state, None
+            )
+        self.assertEqual(selected, "nginx")
+        self.assertEqual(_read_active_profile(config_path), "nginx")
+
+        with patch("ctail.cli._select_profile", return_value=(False, None)):
+            selected = _manage_profiles(
+                console, rules, rules_path, 11, terminal_state, "nginx"
+            )
+        self.assertIsNone(selected)
+        self.assertIsNone(_read_active_profile(config_path))
 
     def test_first_run_creates_example_configuration(self):
         self.config_dir = Path(self.directory.name) / ".config" / "ctail"
@@ -338,6 +540,63 @@ class ListingTests(unittest.TestCase):
         self.assertNotIn("hidden unmatched", output.getvalue())
         self.assertIn("Unmatched lines shown.", output.getvalue())
         self.assertIn("Unmatched lines hidden.", output.getvalue())
+
+    def test_enter_prints_blank_lines_without_interrupting_log_output(self):
+        output = io.StringIO()
+        console = Console(file=output, no_color=True)
+        ready_fds = iter(([11], [11], [10], [10]))
+        reads = {
+            11: [b"\n", b"\r"],
+            10: [b"new event\n", b""],
+        }
+
+        with (
+            patch(
+                "ctail.cli.select.select",
+                side_effect=lambda *_args: (next(ready_fds), [], []),
+            ),
+            patch("ctail.cli.os.read", side_effect=lambda fd, _size: reads[fd].pop(0)),
+        ):
+            completed = _consume_stream(10, console, [], False, keyboard_fd=11)
+
+        self.assertTrue(completed)
+        self.assertEqual(output.getvalue(), "\n\nnew event\n")
+
+    def test_p_selects_profile_for_subsequent_log_lines(self):
+        output = io.StringIO()
+        console = Console(file=output, no_color=True)
+        config_path = self.config_dir / "ctail.toml"
+        config_path.write_text(
+            "[profiles.nginx]\n"
+            "[[profiles.nginx.rules]]\n"
+            'pattern = "nginx-only"\n'
+            'color = "green"\n'
+        )
+        ready_fds = iter(([11], [10], [10]))
+        reads = {11: [b"p"], 10: [b"nginx-only\n", b""]}
+        terminal_state = [0, 0, 0, 0, 0, 0, [0] * 8]
+
+        with (
+            patch(
+                "ctail.cli.select.select",
+                side_effect=lambda *_args: (next(ready_fds), [], []),
+            ),
+            patch("ctail.cli.os.read", side_effect=lambda fd, _size: reads[fd].pop(0)),
+            patch("ctail.cli.Live"),
+            patch("ctail.cli._read_rule_key", side_effect=["down", "enter"]),
+        ):
+            completed = _consume_stream(
+                10,
+                console,
+                [],
+                False,
+                keyboard_fd=11,
+                rules_path=self.config_dir / "rules.toml",
+                original_terminal=terminal_state,
+            )
+
+        self.assertTrue(completed)
+        self.assertIn("nginx-only", output.getvalue())
 
 
 class LessModeTests(unittest.TestCase):
