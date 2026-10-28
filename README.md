@@ -52,6 +52,44 @@ Selecting a profile replaces those top-level rules. Built-in rules and
 top-level rules in `rules.toml` remain active. Temporary rules can also be
 grouped under matching `[profiles.NAME]` sections in `rules.toml`.
 
+To select a profile automatically for a file, add ordered path mappings to
+`ctail.toml`:
+
+```toml
+[[profile_paths]]
+profile = "asaklogs"
+paths = [
+    "~/.local/share/asak2/logs/",
+    "~/other-logs/asak-*.log",
+]
+
+[[profile_paths]]
+profile = "http-access"
+paths = ["/var/log/nginx/*.log"]
+
+[profiles.asaklogs]
+# Add [[profiles.asaklogs.rules]] entries here.
+```
+
+Each mapping references a profile defined in `ctail.toml`. A path ending in
+`/` matches files directly in that directory, not in subdirectories. A path
+without wildcards matches a single file; `*`, `?`, and character classes match
+within one path component, while `**` matches across directory levels. For
+example, `~/logs/**/*.log` includes `.log` files directly in `~/logs` and in
+its subdirectories. Paths are case-sensitive, `~` is expanded, and paths must
+be absolute after expansion. Matching normalizes `.` and `..` without resolving
+symlinks or checking whether the file exists. Input filenames are matched as
+provided to ctail, relative to the current working directory when necessary.
+
+The first matching mapping wins. Selection precedence is: explicit
+`--profile`, path mapping, saved `active_profile`, then default rules.
+Automatic selection does not change `active_profile`. It applies to a single
+identifiable file in either tail or `--less` mode; multiple files, piped input,
+or ambiguous tail options fall back to the saved or default profile. Quote
+patterns in the configuration; shell-expanded arguments that produce multiple
+files do not select a profile automatically. Use `--profile` when automatic
+detection is not possible. Listing commands do not match paths.
+
 ```toml
 show_unmatched = true
 
@@ -123,6 +161,17 @@ empty profile in `ctail.toml`, and activates it as the saved profile. Selecting
 **(default)** removes `active_profile` from the configuration. Adding a rule
 with **c** while a named profile is active stores the rule under that profile
 in `rules.toml`; with **(default)** active, new ad-hoc rules remain shared.
+If a path mapping selected the profile at startup, the terminal shows the
+selected profile, and changing or creating a profile with **p** affects only
+the current run. The profile definition and its rules are still saved. For
+other runs, profile selection retains its usual persistent behavior.
+
+When following one identifiable file, highlight a named profile in the **p**
+selector and press **a** to associate it with the current **f**ile or its
+**d**irectory. Ctail shows the exact pattern and asks for confirmation before
+saving it. The new mapping is inserted first, so it takes precedence over
+existing mappings, and applies on the next launch. Canceling leaves the
+configuration unchanged. This action does not change the active profile.
 Use `--no-color` to disable colored output.
 
 ## Listing colors and rules

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import os
 import re
 import select
@@ -205,6 +206,95 @@ def _parse_rule_profiles(
     return parsed
 
 
+@dataclass(frozen=True)
+class ProfilePath:
+    profile: str
+    pattern: str
+    directory: bool
+
+
+def _parse_profile_paths(
+    data: dict[str, Any], source: Path, profiles: dict[str, list[ColorRule]]
+) -> list[ProfilePath]:
+    entries = data.get("profile_paths", [])
+    if not isinstance(entries, list):
+        raise TypeError(f"{source}: 'profile_paths' must be an array of tables")
+    mappings: list[ProfilePath] = []
+    for index, entry in enumerate(entries, start=1):
+        if not isinstance(entry, dict):
+            raise TypeError(f"{source}: profile_paths {index} must be a table")
+        profile = entry.get("profile")
+        if not isinstance(profile, str) or not profile:
+            raise ValueError(f"{source}: profile_paths {index} needs a non-empty profile")
+        if profile not in profiles:
+            raise ValueError(f"{source}: profile_paths {index} references unknown profile {profile!r}")
+        paths = entry.get("paths")
+        if not isinstance(paths, list) or not paths:
+            raise ValueError(f"{source}: profile_paths {index} needs a non-empty paths array")
+        for pattern in paths:
+            if not isinstance(pattern, str) or not pattern or "\0" in pattern:
+                raise ValueError(f"{source}: profile_paths {index} paths must be non-empty strings")
+            expanded = os.path.expanduser(pattern)
+            if not os.path.isabs(expanded):
+                raise ValueError(f"{source}: profile_paths {index} path must be absolute: {pattern!r}")
+            normalized = os.path.normpath(expanded)
+            try:
+                Path("/").full_match(normalized, case_sensitive=True)
+            except ValueError as error:
+                raise ValueError(
+                    f"{source}: profile_paths {index} invalid pattern {pattern!r}: {error}"
+                ) from error
+            mappings.append(ProfilePath(profile, normalized, pattern.endswith("/")))
+    return mappings
+
+
+def _matching_profile(filename: str, mappings: list[ProfilePath]) -> str | None:
+    path = Path(os.path.abspath(filename))
+    for mapping in mappings:
+        candidate = path.parent if mapping.directory else path
+        if candidate.full_match(mapping.pattern, case_sensitive=True):
+            return mapping.profile
+    return None
+
+
+def _single_file_argument(arguments: list[str], *, less: bool = False) -> str | None:
+    if less:
+        files = arguments[1:] if arguments[:1] == ["--"] else arguments
+        return files[0] if len(files) == 1 and not files[0].startswith("-") else None
+
+    files: list[str] = []
+    options = True
+    index = 0
+    no_value = {"-f", "-F", "-q", "-v", "-z", "--retry", "--quiet", "--silent",
+                "--verbose", "--zero-terminated"}
+    value_options = {"-n", "-c", "-s", "--lines", "--bytes", "--sleep-interval",
+                     "--pid", "--max-unchanged-stats"}
+    while index < len(arguments):
+        arg = arguments[index]
+        if options and arg == "--":
+            options = False
+        elif options and arg in no_value:
+            pass
+        elif options and arg in value_options:
+            index += 1
+            if index >= len(arguments):
+                return None
+        elif options and arg in {"--follow"}:
+            pass
+        elif options and (
+            any(arg.startswith(name + "=") for name in value_options if name.startswith("--"))
+            or arg.startswith("--follow=")
+            or any(arg.startswith(name) and len(arg) > len(name) for name in ("-n", "-c", "-s"))
+        ):
+            pass
+        elif options and arg.startswith("-"):
+            return None
+        else:
+            files.append(arg)
+        index += 1
+    return files[0] if len(files) == 1 and files[0] != "-" else None
+
+
 def _read_toml(path: Path) -> dict[str, Any]:
     try:
         with path.open("rb") as config_file:
@@ -250,6 +340,7 @@ def _load_settings(
         configured_profiles = _parse_rule_profiles(
             config, config_path, allow_builtins=True
         )
+        _parse_profile_paths(config, config_path, configured_profiles)
 
     ad_hoc_rules: list[ColorRule] = []
     profile_ad_hoc_rules: dict[str, list[ColorRule]] = {}
@@ -447,6 +538,8 @@ def _save_rule_document(path: Path, document: TOMLDocument) -> None:
     profiles = _parse_rule_profiles(
         document.unwrap(), path, allow_builtins=path.name == "ctail.toml"
     )
+    if path.name == "ctail.toml":
+        _parse_profile_paths(document.unwrap(), path, profiles)
     active_profile = _configured_active_profile(document.unwrap(), path)
     if active_profile is not None and active_profile not in profiles:
         raise ValueError(
@@ -508,6 +601,25 @@ def _write_profile(path: Path, profile_name: str) -> None:
     if "profiles" not in document:
         document["profiles"] = tomlkit.table()
     document["profiles"][profile_name] = tomlkit.table()
+    _save_rule_document(path, document)
+
+
+def _write_profile_path(path: Path, profile_name: str, pattern: str) -> None:
+    try:
+        document = tomlkit.parse(path.read_text(encoding="utf-8"))
+    except ParseError as error:
+        raise ValueError(f"{path}: invalid TOML: {error}") from error
+    data = document.unwrap()
+    profiles = _parse_rule_profiles(data, path, allow_builtins=True)
+    _parse_profile_paths(data, path, profiles)
+    if "profile_paths" not in document:
+        document["profile_paths"] = tomlkit.aot()
+    entries = document["profile_paths"]
+    if not isinstance(entries, (AoT, Array)):
+        raise TypeError(f"{path}: 'profile_paths' must be an array of tables")
+    entry = tomlkit.inline_table() if isinstance(entries, Array) else tomlkit.table()
+    entry.update({"profile": profile_name, "paths": [pattern]})
+    entries.insert(0, entry)
     _save_rule_document(path, document)
 
 
@@ -618,12 +730,14 @@ def _select_profile(
     config_path: Path,
     keyboard_fd: int,
     active_profile: str | None = None,
-) -> tuple[bool, str | None] | None:
+    source_file: str | None = None,
+) -> tuple[bool | str, str | None] | None:
     config = _read_toml(config_path) if config_path.exists() else {}
     choices: list[str | None] = [None, *sorted(
         _parse_rule_profiles(config, config_path, allow_builtins=True)
     )]
     selected = 0
+    message = ""
 
     def render() -> Group:
         table = Table(title="Select profile", show_header=False, box=None)
@@ -638,9 +752,11 @@ def _select_profile(
             if index == selected:
                 row.stylize("reverse")
             table.add_row(row)
+        actions = "n  Add a new profile"
+        if source_file is not None:
+            actions += "    a  Associate selected profile with this file or directory"
         return Group(
-            table,
-            Text("n  Add a new profile", style="dim"),
+            table, Text(actions, style="dim"), Text(message, style="yellow"),
             Text("Up/Down: select  Enter: apply  Escape: cancel", style="dim"),
             Text(f"{selected + 1}/{len(choices)}", style="dim"),
         )
@@ -657,11 +773,42 @@ def _select_profile(
                 return False, choices[selected]
             if key in ("n", "N"):
                 return True, None
+            if key in ("a", "A") and source_file is not None:
+                if choices[selected] is not None:
+                    return "associate", choices[selected]
+                message = "Select a named profile to create an association."
             if key == "up":
                 selected = max(0, selected - 1)
             elif key == "down":
                 selected = min(len(choices) - 1, selected + 1)
             live.update(render(), refresh=True)
+
+
+def _associate_profile(
+    console: Console, config_path: Path, keyboard_fd: int, filename: str, profile: str
+) -> None:
+    console.print("Associate profile with: f: this file  d: its directory  Escape: cancel")
+    choice = _read_rule_key(keyboard_fd).lower()
+    if choice not in ("f", "d"):
+        console.print("Association canceled.", style="dim")
+        return
+    absolute = os.path.abspath(filename)
+    pattern = glob.escape(absolute if choice == "f" else os.path.dirname(absolute))
+    if choice == "d":
+        pattern = pattern.rstrip("/") + "/"
+    console.print(Text(
+        f"Associate profile {profile!r} with pattern {pattern!r}? "
+        "This takes priority over existing mappings. y: confirm  any other key: cancel"
+    ))
+    if _read_rule_key(keyboard_fd).lower() != "y":
+        console.print("Association canceled.", style="dim")
+        return
+    try:
+        _write_profile_path(config_path, profile, pattern)
+    except (OSError, TypeError, ValueError) as error:
+        console.print(f"Could not save profile association: {error}", style="bold red")
+        return
+    console.print("Association saved; it will apply on the next launch.", style="dim")
 
 
 def _prompt_profile_name(
@@ -691,12 +838,15 @@ def _manage_profiles(
     keyboard_fd: int,
     original_terminal: list[Any],
     profile: str | None,
+    *,
+    source_file: str | None = None,
+    session_only: bool = False,
 ) -> str | None:
     config_path = rules_path.with_name("ctail.toml")
     while True:
         try:
             selection = _select_profile(
-                console, config_path, keyboard_fd, profile
+                console, config_path, keyboard_fd, profile, source_file
             )
         except (OSError, TypeError, ValueError) as error:
             console.print(f"Could not list profiles: {error}", style="bold red")
@@ -705,6 +855,10 @@ def _manage_profiles(
             return profile
 
         add_new, selected_profile = selection
+        if add_new == "associate":
+            assert source_file is not None and selected_profile is not None
+            _associate_profile(console, config_path, keyboard_fd, source_file, selected_profile)
+            continue
         if add_new:
             name = _prompt_profile_name(console, keyboard_fd, original_terminal)
             if name is None:
@@ -723,14 +877,15 @@ def _manage_profiles(
                     style="bold red",
                 )
                 return profile
-            try:
-                _write_active_profile(config_path, name)
-            except (OSError, TypeError, ValueError) as error:
-                console.print(
-                    f"Profile {name!r} was created but could not be activated: {error}",
-                    style="bold red",
-                )
-                return profile
+            if not session_only:
+                try:
+                    _write_active_profile(config_path, name)
+                except (OSError, TypeError, ValueError) as error:
+                    console.print(
+                        f"Profile {name!r} was created but could not be activated: {error}",
+                        style="bold red",
+                    )
+                    return profile
             rules[:] = loaded_rules
             console.print(f"Added and selected profile {name!r}.", style="dim")
             return name
@@ -739,7 +894,8 @@ def _manage_profiles(
             _, loaded_rules, _ = _load_settings(
                 rules_path.parent, selected_profile
             )
-            _write_active_profile(config_path, selected_profile)
+            if not session_only:
+                _write_active_profile(config_path, selected_profile)
         except (OSError, TypeError, ValueError) as error:
             console.print(f"Could not select profile: {error}", style="bold red")
             return profile
@@ -857,6 +1013,9 @@ def _consume_stream(
     rules_path: Path | None = None,
     original_terminal: list[Any] | None = None,
     profile: str | None = None,
+    *,
+    source_file: str | None = None,
+    session_only_profile: bool = False,
 ) -> bool:
     buffer = bytearray()
     paused = False
@@ -880,7 +1039,7 @@ def _consume_stream(
             elif key in (b"p", b"P") and rules_path is not None and original_terminal is not None:
                 active_profile = _manage_profiles(
                     console, rules, rules_path, keyboard_fd, original_terminal,
-                    active_profile,
+                    active_profile, source_file=source_file, session_only=session_only_profile,
                 )
             elif key in (b"f", b"F"):
                 show_unmatched = not show_unmatched
@@ -1093,10 +1252,25 @@ def main() -> None:
             if not options.show_rules:
                 return
         config_path = config_dir / "ctail.toml"
+        config = _read_toml(config_path) if config_path.exists() else {}
+        configured_profiles = _parse_rule_profiles(config, config_path, allow_builtins=True)
+        mappings = _parse_profile_paths(config, config_path, configured_profiles)
+        has_file_source = sys.stdin.isatty() and bool(tail_arguments)
+        source_file = None
+        if not options.show_rules and not options.version:
+            if options.less:
+                source_file = _single_file_argument(tail_arguments, less=True)
+            elif has_file_source:
+                source_file = _single_file_argument(tail_arguments)
+        matched_profile = (
+            _matching_profile(source_file, mappings) if source_file is not None else None
+        )
+        automatic_profile = options.profile is None and matched_profile is not None
         active_profile = (
             options.profile
             if options.profile is not None
-            else _read_active_profile(config_path)
+            else matched_profile if automatic_profile
+            else _configured_active_profile(config, config_path)
         )
         show_unmatched, rules, rules_path = _load_settings(config_dir, active_profile)
         if options.profile is not None and not options.show_rules:
@@ -1110,7 +1284,6 @@ def main() -> None:
         if options.version:
             console.print(f"ctail version {VERSION}")
             return
-        has_file_source = sys.stdin.isatty() and bool(tail_arguments)
         process = _tail_process(tail_arguments) if has_file_source else None
         source = process.stdout if process is not None else sys.stdin.buffer
         if source is None:
@@ -1128,6 +1301,10 @@ def main() -> None:
                 "Enter: blank line  Space: pause/resume  p: profile  c: add rule  r: remove rule  "
                 "d: enable/disable rule  ?: help  q: quit", style="dim",
             )
+            if automatic_profile:
+                console.print(Text(
+                    f"Profile {active_profile!r} selected by file path.", style="dim"
+                ))
 
         _consume_stream(
             source.fileno(),
@@ -1138,6 +1315,8 @@ def main() -> None:
             rules_path if keyboard_fd is not None else None,
             original_terminal,
             active_profile,
+            source_file=source_file,
+            session_only_profile=automatic_profile,
         )
     except (OSError, RuntimeError, TypeError, ValueError, tomllib.TOMLDecodeError) as error:
         parser.exit(2, f"ctail: error: {error}\n")

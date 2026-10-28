@@ -1,5 +1,11 @@
 show_unmatched = true
 
+# Automatically select an existing profile for matching files.
+# Mappings are checked in order; the first match wins.
+# [[profile_paths]]
+# profile = "http-access"
+# paths = ["~/logs/http/", "/var/log/nginx/*.log"]
+
 
 [[rules]]
 name = "Syslog timestamp"
