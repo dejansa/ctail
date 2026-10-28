@@ -150,17 +150,17 @@ rules manager, **?** to show the interactive
 command list, or **q** to quit. The
 **f** toggle applies only to the current run; it does not change
 `ctail.toml`. The help panel closes when any key is pressed. Rules created
-with **c** are saved in `~/.config/ctail/rules.toml`. With no active profile
-they are shared; when a profile is active they are saved to that profile and
-apply only to it.
+with **c** are saved in `~/.config/ctail/rules.toml`. A named active profile
+is the default destination, but the editor can instead save a shared rule.
+Without an active named profile, new rules are shared.
 
 Press **p** to open the profile selector. **(default)** is the first option;
 use **Up/Down** and **Enter** to select a profile, or **Escape** to cancel.
 The **n** action shown below the profile list prompts for a name, saves a new
 empty profile in `ctail.toml`, and activates it as the saved profile. Selecting
 **(default)** removes `active_profile` from the configuration. Adding a rule
-with **c** while a named profile is active stores the rule under that profile
-in `rules.toml`; with **(default)** active, new ad-hoc rules remain shared.
+with **c** while a named profile is active defaults to that profile in
+`rules.toml`; with **(default)** active, new ad-hoc rules are shared.
 If a path mapping selected the profile at startup, the terminal shows the
 selected profile, and changing or creating a profile with **p** affects only
 the current run. The profile definition and its rules are still saved. For
@@ -210,6 +210,8 @@ type, name, pattern and style. The table fits its contents up to 100 columns;
 long fields may be truncated to fit the table or a narrow terminal.
 Use **Up/Down** to select a rule:
 
+- **a** opens the rule editor to add a literal rule.
+- **e** opens the same editor for the selected rule.
 - **d** toggles the selected rule's enabled/disabled state.
 - **x** removes a custom rule after confirmation. Built-ins cannot be removed.
 - **m** moves an ad-hoc `rules.toml` rule to a named profile or to
@@ -230,6 +232,41 @@ Changes apply immediately to subsequent log lines and persist across restarts.
 Custom rules are changed in their own source file; existing comments, other
 rules, and unrelated settings are preserved. Failed saves are reported without
 changing the running rule list.
+
+### Rule editor
+
+The editor is also opened by **c** while following a log. Use **Left/Right**
+to select Pattern, Foreground, Background, Bold, Inverse, Style, Scope, Save or
+Cancel. For colors, **Up/Down** browse the named colors, including `default`
+and `none`; the selected Pattern, Foreground or Background field is marked
+with `>`, and nearby color choices are shown above and below it. To change
+Bold or Inverse, use **Left/Right** to select its label, then press
+**Up/Down** or **Enter** to toggle it. A preview shows the current style.
+
+With Pattern selected, type directly and use **Backspace** to remove the last
+character. **Left/Right** still move between fields. For editing at a specific
+position, press **Enter** on Pattern or Style to enter text-edit mode. In that mode,
+**Left/Right** move the cursor, **Backspace** deletes, **Enter** accepts the
+text, and **Escape** discards that text edit. Directly typed pattern changes
+remain in the editor until saved or canceled. Outside text-edit mode,
+**Escape** cancels the entire editor. Select Save and press **Enter** to
+validate and save; errors leave the editor open.
+
+New rules are literal and are inserted at the beginning of their selected
+scope. On Scope, use **Up/Down** or **Enter** to choose between the active
+named profile and **All profiles (shared)**. With no named profile, only the
+shared destination is available. Editing retains the selected rule's existing
+file, scope, priority, name, enabled state and literal/regex mode. Use the
+manager's **m** action to move an ad-hoc rule instead.
+
+The Style field accepts the full Rich style syntax, including custom colors and
+comma-separated capture-group styles. Styles with attributes beyond the
+foreground, background, bold and inverse controls, or multiple capture-group
+styles, remain unchanged unless edited in Style. The visual color and
+attribute controls are unavailable for those complex styles; edit Style
+directly to change them. Built-in patterns are read-only; editing a built-in
+style saves an override in `ctail.toml` for the current profile or default
+rules.
 
 To disable a custom rule manually, add `disabled = true` to its `[[rules]]`
 entry in either configuration file:
@@ -296,10 +333,12 @@ printf '%s\n' '2026-10-22 11:00:02 [DEBUG] example detail' >> /tmp/ctail-demo.lo
 ```
 
 While `ctail` is following the file, press **Space** to pause/resume, **c** to
-enter a literal string and Rich color for a persisted ad-hoc rule, **r** to open
+open the rule editor for a persisted ad-hoc rule, **r** to open
 the rules manager, **?** to open the help panel, and **q** to quit. In the
-manager, check arrow-key navigation, **d** to toggle, **x** to remove, **m** to
-move an ad-hoc rule, confirmation and **Escape** cancellation;
+manager, check arrow-key navigation, **a** to add, **e** to edit, **d** to
+toggle, **x** to remove, **m** to move an ad-hoc rule, confirmation and
+**Escape** cancellation. In the editor, check color browsing, the preview,
+scope selection, saving and cancellation;
 restart the app or run `ctail --show-rules` to verify the saved state.
 Interactive keys are available when following a file in a terminal;
 they are not used when input is piped. Remove the sample file afterward with
@@ -374,8 +413,9 @@ regex = false
 These sample ad-hoc rules match literal text. Rules added interactively are
 also saved as literal matches in `rules.toml`. Top-level `[[rules]]` entries
 are shared by every profile; rules under `[profiles.NAME]` apply only to the
-matching profile in `ctail.toml`. Interactive rules are saved under the active named profile, and as shared rules
-when no profile is active. The active profile is persistent, so after selecting
+matching profile in `ctail.toml`. Interactive rules default to the active named
+profile, but can be saved as shared rules; without a named profile they are
+shared. The active profile is persistent, so after selecting
 it once you can start ctail without `--profile`. To change it for a run and
 persist that change, supply a different profile explicitly:
 
