@@ -27,6 +27,9 @@ from tomlkit.items import AoT, Array
 from tomlkit.toml_document import TOMLDocument
 
 
+VERSION="0.1.1"
+
+
 @dataclass(frozen=True)
 class ColorRule:
     pattern: str
@@ -1065,6 +1068,11 @@ def main() -> None:
         action="store_true",
         help="show coloring rules, optionally scoped to a profile, and exit",
     )
+    parser.add_argument(
+        "-v", "--version",
+        action="store_true",
+        help="show the version and exit",
+    )
     options, tail_arguments = parser.parse_known_args()
 
     console = Console(
@@ -1098,6 +1106,9 @@ def main() -> None:
             return
         if options.less:
             _show_with_less(tail_arguments, console, rules, show_unmatched)
+            return
+        if options.version:
+            console.print(f"ctail version {VERSION}")
             return
         has_file_source = sys.stdin.isatty() and bool(tail_arguments)
         process = _tail_process(tail_arguments) if has_file_source else None
