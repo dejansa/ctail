@@ -1,8 +1,10 @@
 import io
 import re
 import tempfile
+import tomllib
 import unittest
 from contextlib import redirect_stdout
+from importlib.metadata import version
 from pathlib import Path
 from unittest.mock import patch
 
@@ -81,6 +83,16 @@ class ListingTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 0)
         for key in ("Enter", "Space", "p", "n", "c", "f", "r", "d", "?", "q"):
             self.assertIn(key, output.getvalue())
+
+    def test_version_options_use_installed_project_version(self):
+        project_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
+        with project_path.open("rb") as project_file:
+            project_version = tomllib.load(project_file)["project"]["version"]
+        self.assertEqual(version("ctail"), project_version)
+        for option in ("-v", "--version"):
+            with self.subTest(option=option):
+                output = re.sub(r"\x1b\[[0-9;]*m", "", self.invoke(option))
+                self.assertEqual(output, f"ctail version {project_version}\n")
 
     def test_rules_aliases_show_sources_modes_and_priority(self):
         self.write_rules()

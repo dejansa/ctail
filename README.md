@@ -18,6 +18,9 @@ ctail --less /var/log/myapp.log
 cat application.log | ctail -l
 ```
 
+Use `ctail --version` (or `ctail -v`) to show the installed package version.
+The version is maintained in `pyproject.toml`.
+
 ## Install from GitLab
 
 With SSH access to the GitLab repository and Python 3.14 or newer, install the

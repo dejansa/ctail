@@ -12,6 +12,7 @@ import tempfile
 import termios
 import tomllib
 from dataclasses import dataclass
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any, BinaryIO, TextIO
 
@@ -28,9 +29,6 @@ from rich.text import Text
 from tomlkit.exceptions import ParseError
 from tomlkit.items import AoT, Array, InlineTable, Table as TOMLTable
 from tomlkit.toml_document import TOMLDocument
-
-
-VERSION="0.1.1"
 
 
 @dataclass(frozen=True)
@@ -1770,7 +1768,7 @@ def main() -> None:
             _show_with_less(tail_arguments, console, rules, show_unmatched)
             return
         if options.version:
-            console.print(f"ctail version {VERSION}")
+            console.print(f"ctail version {version('ctail')}")
             return
         process = _tail_process(tail_arguments) if has_file_source else None
         source = process.stdout if process is not None else sys.stdin.buffer
