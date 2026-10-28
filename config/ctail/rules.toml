@@ -1,4 +1,4 @@
-# Ad-hoc literal matches created while ctail is running.
+# Ad-hoc color rules created while ctail is running.
 # Edit or remove entries here; these are separate from ctail.toml.
 
 [[rules]]

@@ -148,7 +148,7 @@ Built-in rules color `[ERROR]`/`[FATAL]`, `[WARN]`/`[WARNING]`, `[INFO]`, and
 When following a file in an interactive terminal, press **Space** to
 pause/resume, **Enter** to print a blank line and visually separate log output,
 **p** to select a coloring-rule profile, **f** to toggle whether unmatched
-lines are shown, **c** to add a literal text/color rule, **r** to open the
+lines are shown, **c** to add a color rule, **r** to open the
 rules manager, **?** to show the interactive
 command list, or **q** to quit. The
 **f** toggle applies only to the current run; it does not change
@@ -211,11 +211,12 @@ are shown in a terminal; redirected output and `--no-color` produce plain text.
 While following a file, press **r** to open the rules manager. It lists the
 current profile's effective rules in priority order, including shared ad-hoc
 rules, disabled rules and built-ins. Columns show status, source, profile,
-type, name, pattern and style. The table fits its contents up to 100 columns;
-long fields may be truncated to fit the table or a narrow terminal.
+type, name, pattern and style. The table uses the available terminal width;
+Name and Pattern grow to fit their contents and wrap when space is limited.
+The manager adjusts the visible rows to keep the selected rule in view.
 Use **Up/Down** to select a rule:
 
-- **a** opens the rule editor to add a literal rule.
+- **a** opens the rule editor to add a rule.
 - **e** opens the same editor for the selected rule.
 - **d** toggles the selected rule's enabled/disabled state.
 - **x** removes a custom rule after confirmation. Built-ins cannot be removed.
@@ -244,14 +245,16 @@ The editor is also opened by **c** while following a log. Use **Left/Right**
 to select Pattern, Foreground or Background. For colors, **Up/Down** browse
 the named colors, including `default` and `none`; nearby choices are shown
 above and below the selection. Press **Down** from Pattern or **Right** from
-Background to reach the options; **Up** from Bold returns to Background.
-Use **Up/Down** to select Bold, Inverse, Style, Scope, Save or Cancel.
-Use **Left/Right** or **Enter** to toggle Bold or Inverse. A preview shows the
+Background to select Bold; **Up** from Bold returns to Background.
+Use **Up/Down** to select Bold, Inverse, Style, Scope, Mode, Save or Cancel.
+Use **Left/Right** or **Enter** to toggle Bold, Inverse or Mode. A preview shows the
 current style.
 Turning either attribute off removes it from the style; explicitly entered
 negative attributes are otherwise preserved.
 The controls and keyboard instructions are displayed on separate lines.
 Very short terminals use a compact layout.
+The Pattern column is 44 terminal cells wide when space permits; on narrower
+terminals the columns shrink, and the pattern view keeps the cursor visible.
 
 With Pattern selected, type directly and use **Backspace** to remove the last
 character. **Left/Right** still move between fields. For editing at a specific
@@ -262,12 +265,14 @@ remain in the editor until saved or canceled. Outside text-edit mode,
 **Escape** cancels the entire editor. Select Save and press **Enter** to
 validate and save; errors leave the editor open.
 
-New rules are literal and are inserted at the beginning of their selected
-scope. On Scope, use **Left/Right** or **Enter** to choose between the active
+New rules default to literal matching; select **Mode** and toggle it to
+**regex** to use a regular expression. Rules are inserted at the beginning of
+their selected scope. On Scope, use **Left/Right** or **Enter** to choose between the active
 named profile and **All profiles (shared)**. With no named profile, only the
 shared destination is available. Editing retains the selected rule's existing
-file, scope, priority, name, enabled state and literal/regex mode. Use the
-manager's **m** action to move an ad-hoc rule instead.
+file, scope, priority, name, enabled state and mode unless you change Mode.
+Built-in patterns and their regex mode cannot be changed. Use the manager's
+**m** action to move an ad-hoc rule instead.
 
 The Style field accepts the full Rich style syntax, including custom colors and
 comma-separated capture-group styles. Styles with attributes beyond the
@@ -420,8 +425,9 @@ color = "yellow"
 regex = false
 ```
 
-These sample ad-hoc rules match literal text. Rules added interactively are
-also saved as literal matches in `rules.toml`. Top-level `[[rules]]` entries
+These sample ad-hoc rules match literal text. Rules added interactively default
+to literal matching but can use regex mode; they are saved in `rules.toml`.
+Top-level `[[rules]]` entries
 are shared by every profile; rules under `[profiles.NAME]` apply only to the
 matching profile in `ctail.toml`. Interactive rules default to the active named
 profile, but can be saved as shared rules; without a named profile they are

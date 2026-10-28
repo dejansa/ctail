@@ -19,7 +19,6 @@ from typing import Any, BinaryIO, TextIO
 import tomlkit
 from rich.color import ANSI_COLOR_NAMES, Color, ColorParseError
 from rich.cells import cell_len
-from rich.constrain import Constrain
 from rich.console import Console, Group
 from rich.errors import StyleSyntaxError
 from rich.live import Live
@@ -638,12 +637,14 @@ def _write_ad_hoc_rule(
     pattern: str,
     color: str,
     profile_name: str | None = None,
+    *,
+    regex_enabled: bool = False,
 ) -> None:
     document, entries = _read_rule_document(
         path, profile_name, create_profile=profile_name is not None
     )
     entry = tomlkit.inline_table() if isinstance(entries, Array) else tomlkit.table()
-    entry.update({"pattern": pattern, "color": color, "regex": False, "disabled": False})
+    entry.update({"pattern": pattern, "color": color, "regex": regex_enabled, "disabled": False})
     entries.insert(0, entry)
     _save_rule_document(path, document)
 
@@ -685,12 +686,15 @@ def _edit_rule(
     color: str,
     *,
     profile: str | None = None,
+    regex_enabled: bool | None = None,
 ) -> None:
     _, current_rules, _ = _load_settings(rules_path.parent, profile)
     if rule not in current_rules:
         raise ValueError("Rules changed on disk; restart ctail before editing this rule.")
     if rule.source == "built-in" and pattern != rule.pattern:
         raise ValueError("Built-in patterns cannot be changed.")
+    if rule.source == "built-in" and regex_enabled is False:
+        raise ValueError("Built-in rules must use regex.")
     path = rules_path.with_name("ctail.toml") if rule.source == "built-in" else Path(rule.source)
     scope = profile if rule.source == "built-in" and rule.source_index is None else rule.profile_name
     document, entries = _read_rule_document(path, scope)
@@ -704,6 +708,8 @@ def _edit_rule(
         entry = entries[rule.source_index]
         if rule.source != "built-in":
             entry["pattern"] = pattern
+            if regex_enabled is not None and regex_enabled != rule.regex_enabled:
+                entry["regex"] = regex_enabled
         entry["color"] = color
     _save_rule_document(path, document)
 
@@ -803,7 +809,11 @@ def _read_rule_key(keyboard_fd: int) -> str:
 
 _EDITOR_COLORS = ("none", *sorted({"default", *ANSI_COLOR_NAMES}))
 _EDITOR_COLUMN_WIDTH = max(cell_len(name) for name in _EDITOR_COLORS) + 1
-_EDITOR_FIELDS = ("Pattern", "Foreground", "Background", "Bold", "Inverse", "Style", "Scope", "Save", "Cancel")
+_EDITOR_PATTERN_WIDTH = 55
+_EDITOR_FIELDS = (
+    "Pattern", "Foreground", "Background", "Bold", "Inverse", "Style", "Scope",
+    "Mode", "Save", "Cancel",
+)
 
 
 @dataclass
@@ -817,6 +827,7 @@ class _RuleEditorState:
     text: str = ""
     cursor: int = 0
     message: str = ""
+    regex_enabled: bool = False
 
 
 def _editor_style(color: str) -> Style | None:
@@ -878,11 +889,19 @@ def _render_rule_editor(console: Console, state: _RuleEditorState, profile: str 
     foreground = style.color.name if style and style.color else "none"
     background = style.bgcolor.name if style and style.bgcolor else "none"
     table = Table(title="Edit rule" if state.rule else "Add rule", box=None, padding=(0, 0))
-    pattern_width = _EDITOR_COLUMN_WIDTH - 1
-    for heading in ("Pattern", "Foreground", "Background"):
-        table.add_column(heading, width=_EDITOR_COLUMN_WIDTH, overflow="ellipsis", no_wrap=True)
-    compact = console.size.height < 19
-    height = max(1, min(5, console.size.height - (9 if compact else 18)))
+    available_width = max(3, console.width)
+    min_color_width = min(10, max(1, (available_width - min(22, available_width // 2)) // 2))
+    pattern_column_width = min(_EDITOR_PATTERN_WIDTH, available_width - 2 * min_color_width)
+    color_width = min(_EDITOR_COLUMN_WIDTH, (available_width - pattern_column_width) // 2)
+    pattern_width = pattern_column_width - 1
+    for heading, width in (
+        ("Pattern", pattern_column_width),
+        ("Foreground", color_width),
+        ("Background", color_width),
+    ):
+        table.add_column(heading, width=width, overflow="ellipsis", no_wrap=True)
+    compact = console.size.height < 20
+    height = max(1, min(5, console.size.height - (9 if compact else 19)))
     center = height // 2
     fg_choices = _editor_color_choices(None if foreground == "none" else foreground)
     bg_choices = _editor_color_choices(None if background == "none" else background)
@@ -931,6 +950,7 @@ def _render_rule_editor(console: Console, state: _RuleEditorState, profile: str 
             if state.editing and field == "Style" else state.color
         ),
         "Scope": scope,
+        "Mode": "regex" if state.regex_enabled else "literal",
         "Save": "",
         "Cancel": "",
     }
@@ -940,7 +960,7 @@ def _render_rule_editor(console: Console, state: _RuleEditorState, profile: str 
         result.append(label, style="reverse" if field == name else None)
         return result
 
-    controls = [control(name) for name in ("Bold", "Inverse", "Style", "Scope", "Save", "Cancel")]
+    controls = [control(name) for name in ("Bold", "Inverse", "Style", "Scope", "Mode", "Save", "Cancel")]
     try:
         preview_style = _split_colors(state.color)[0]
         Style.parse(preview_style)
@@ -950,16 +970,16 @@ def _render_rule_editor(console: Console, state: _RuleEditorState, profile: str 
     instructions = (
         ("Editing text", "Left/Right: move", "Backspace: delete", "Enter: accept", "Esc: cancel")
         if state.editing else (
-            "Type pattern",
+            "Type pattern; Enter: edit/select; Esc: cancel",
             "Columns: Left/Right; colors: Up/Down",
             "Options: Up/Down; values: Left/Right",
-            "Pattern Down / Background Right: options; Bold Up: columns",
-            "Enter: edit/select; Esc: cancel",
+            "From Pattern press Down, or from Background press Right, to select Bold",
+            "From Bold press Up to return to Background",
         )
     )
     notice = "Complex style: use Style to edit it." if style is None else ""
     if state.rule and state.rule.source == "built-in":
-        notice = "Built-in pattern is read-only. " + notice
+        notice = "Built-in pattern and regex mode are read-only. " + notice
     if state.rule is None and profile is None:
         notice = "No named profile is active; new rules are shared. " + notice
     message = state.message or notice
@@ -973,7 +993,7 @@ def _render_rule_editor(console: Console, state: _RuleEditorState, profile: str 
             ("Editing: Left/Right move; Backspace deletes; Enter accepts; Esc cancels", "")
             if state.editing else (
                 "L/R: columns or values; U/D: colors or options; Enter: select; Esc: cancel",
-                "Pattern Down / Background Right: options; Bold Up: columns",
+                "Pattern + Down or Background + Right: select Bold; Bold + Up: Background",
             )
         )
         return Group(
@@ -1007,6 +1027,7 @@ def _rule_editor(
     state = _RuleEditorState(
         rule.pattern if rule else "", rule.color if rule else "yellow",
         rule.profile_name if rule else profile, rule,
+        regex_enabled=rule.regex_enabled if rule else False,
     )
     while True:
         live.update(_render_rule_editor(console, state, profile), refresh=True)
@@ -1050,6 +1071,11 @@ def _rule_editor(
                 _editor_change_style(state, field, -1 if key == "left" else 1)
             elif field == "Scope" and rule is None and profile is not None:
                 state.scope = None if state.scope is not None else profile
+            elif field == "Mode":
+                if rule is not None and rule.source == "built-in":
+                    state.message = "Built-in rules must use regex."
+                else:
+                    state.regex_enabled = not state.regex_enabled
         elif key in ("up", "down"):
             if field in ("Foreground", "Background"):
                 _editor_change_style(state, field, -1 if key == "up" else 1)
@@ -1071,13 +1097,24 @@ def _rule_editor(
                 _editor_change_style(state, field, 1)
             elif field == "Scope" and rule is None and profile is not None:
                 state.scope = None if state.scope is not None else profile
+            elif field == "Mode":
+                if rule is not None and rule.source == "built-in":
+                    state.message = "Built-in rules must use regex."
+                else:
+                    state.regex_enabled = not state.regex_enabled
             elif field == "Save":
                 try:
                     _load_settings(rules_path.parent, profile)
                     if rule is None:
-                        _write_ad_hoc_rule(rules_path, state.pattern, state.color, state.scope)
+                        _write_ad_hoc_rule(
+                            rules_path, state.pattern, state.color, state.scope,
+                            regex_enabled=state.regex_enabled,
+                        )
                     else:
-                        _edit_rule(rule, rules_path, state.pattern, state.color, profile=profile)
+                        _edit_rule(
+                            rule, rules_path, state.pattern, state.color,
+                            profile=profile, regex_enabled=state.regex_enabled,
+                        )
                 except (OSError, TypeError, ValueError) as error:
                     state.message = f"Could not save rule: {error}"
                     continue
@@ -1299,49 +1336,78 @@ def _manage_profiles(
 def _render_rule_manager(
     console: Console, rules: list[ColorRule], selected: int, message: str
 ) -> Group:
-    table = Table(title="Rules manager", box=None, padding=(0, 1))
-    for heading, minimum, maximum in (
-        ("", 1, 1), ("Status", 8, 8), ("Source", 10, 12), ("Profile", 7, 16),
-        ("Type", 7, 7), ("Name", 4, 24), ("Pattern", 8, 40), ("Style", 6, 20),
-    ):
-        table.add_column(
-            heading, min_width=minimum, max_width=maximum,
-            no_wrap=heading not in {"Name", "Pattern"}, overflow="ellipsis",
-        )
-    page_size = max(1, console.size.height - 6)
-    start = (selected // page_size) * page_size
-    for index in range(start, min(start + page_size, len(rules))):
-        rule = rules[index]
-        source = "built-in" if rule.source == "built-in" else Path(rule.source).name
-        style = rule.group_colors[0] if rule.group_colors else rule.color
-        cells = [
-            Text(">" if index == selected else " "),
-            Text("disabled" if rule.disabled else "enabled"),
-            Text(source),
-            Text(rule.profile_name or ("shared" if source == "rules.toml" else "-")),
-            Text("regex" if rule.regex_enabled else "literal"),
-            Text(rule.name or "-", no_wrap=True),
-            Text(repr(rule.pattern), style=style, no_wrap=True),
-            Text(rule.color, style=style),
-        ]
-        if index == selected:
-            for cell in cells:
-                cell.stylize("reverse")
-        table.add_row(*cells)
+    pattern_width = max(20, max((cell_len(repr(rule.pattern)) + 1 for rule in rules), default=0))
+    name_width = max(20, max((cell_len(rule.name or "-") + 1 for rule in rules), default=0))
+
+    def make_table(start: int, end: int) -> Table:
+        table = Table(title="Rules manager", box=None, padding=(0, 0, 0, 1))
+        for heading, minimum, maximum in (
+            ("", 1, 1), ("Status", 8, 8), ("Source", 10, 12), ("Profile", 7, 16),
+            ("Type", 7, 7), ("Name", 4, name_width), ("Pattern", 8, pattern_width),
+            ("Style", 6, 20),
+        ):
+            flexible = heading in {"Name", "Pattern"}
+            table.add_column(
+                heading.ljust(20) if flexible else heading,
+                min_width=minimum, max_width=maximum,
+                no_wrap=not flexible, overflow="fold" if flexible else "ellipsis",
+            )
+        for index in range(start, end):
+            rule = rules[index]
+            source = "built-in" if rule.source == "built-in" else Path(rule.source).name
+            style = rule.group_colors[0] if rule.group_colors else rule.color
+            name, pattern = rule.name or "-", repr(rule.pattern)
+            name += " " * max(1, 20 - cell_len(name))
+            pattern += " " * max(1, 20 - cell_len(pattern))
+            cells = [
+                Text(">" if index == selected else " "),
+                Text("disabled" if rule.disabled else "enabled"),
+                Text(source),
+                Text(rule.profile_name or ("shared" if source == "rules.toml" else "-")),
+                Text("regex" if rule.regex_enabled else "literal"),
+                Text(name, no_wrap=False, overflow="fold"),
+                Text(pattern, style=style, no_wrap=False, overflow="fold"),
+                Text(rule.color, style=style),
+            ]
+            if index == selected:
+                for cell in cells:
+                    cell.stylize("reverse")
+            table.add_row(*cells)
+        return table
+
     position = f"{selected + 1}/{len(rules)}" if rules else "0/0"
-    return Group(
-        Constrain(table, width=100),
+    footer = [
         Text(""),
-        Text("Up/Down: select", style="dim"),
-        Text("a: add", style="dim"),
-        Text("e: edit", style="dim"),
-        Text("d: enable/disable", style="dim"),
-        Text("x: remove", style="dim"),
-        Text("m: move", style="dim"),
-        Text("Esc: close", style="dim"),
+        Text("Up/Down: select  a: add  e: edit  d: enable/disable", style="dim"),
+        Text("x: remove  m: move  Esc: close", style="dim"),
         Text(message, style="yellow"),
         Text(position, style="dim"),
+    ]
+    footer_height = sum(
+        len(console.render_lines(item, options=console.options, pad=False))
+        for item in footer
     )
+    start = selected if rules else 0
+    end = start + (1 if rules else 0)
+    table = make_table(start, end)
+    table_height = max(3, console.size.height - footer_height)
+
+    def fits(candidate: Table) -> bool:
+        return len(console.render_lines(candidate, options=console.options, pad=False)) <= table_height
+
+    while start > 0:
+        candidate = make_table(start - 1, end)
+        if not fits(candidate):
+            break
+        start -= 1
+        table = candidate
+    while end < len(rules):
+        candidate = make_table(start, end + 1)
+        if not fits(candidate):
+            break
+        end += 1
+        table = candidate
+    return Group(table, *footer)
 
 
 def _manage_rules(
@@ -1473,9 +1539,9 @@ def _show_interactive_help(console: Console, keyboard_fd: int) -> None:
     commands = Table(show_header=True, header_style="bold")
     commands.add_column("Key", style="cyan", no_wrap=True)
     commands.add_column("Command")
-    commands.add_row("p", "Select a coloring-rule profile")
     commands.add_row("Space", "Pause or resume log output")
-    commands.add_row("c", "Add a literal color rule")
+    commands.add_row("p", "Select a coloring-rule profile")
+    commands.add_row("c", "Add a color rule")
     commands.add_row("f", "Toggle display of unmatched lines")
     commands.add_row("r", "Open the rules manager")
     commands.add_row("?", "Show this command list")
@@ -1676,7 +1742,7 @@ def main() -> None:
             "  Enter  Print a blank line to separate log output\n"
             "  Space  Pause or resume log output\n"
             "  p      Select a coloring-rule profile (n adds one)\n"
-            "  c      Add a literal color rule\n"
+            "  c      Add a color rule\n"
             "  r      Open the rules manager\n"
             "  ?      Show the interactive command list\n"
             "  q      Quit ctail"
