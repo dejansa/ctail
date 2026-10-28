@@ -263,6 +263,66 @@ class ProfilePathTests(unittest.TestCase):
             result = _select_profile(console, self.config_path, 11, source_file="file.log")
         self.assertEqual(result, ("associate", "one"))
 
+    def test_selector_displays_configured_paths_for_each_profile(self):
+        self.config_path.write_text(
+            '[[profile_paths]]\nprofile = "one"\n'
+            'paths = ["~/logs/", "/tmp/[ab]*.log"]\n'
+            '[[profile_paths]]\nprofile = "two"\npaths = ["/var/log/*.log"]\n'
+            '[[profile_paths]]\nprofile = "one"\npaths = ["/tmp/other.log"]\n'
+            "[profiles.one]\n[profiles.two]\n[profiles.empty]\n"
+        )
+        output = io.StringIO()
+        console = Console(file=output, color_system=None, width=100, height=30)
+        with (
+            patch("ctail.cli.Live") as live,
+            patch("ctail.cli._read_rule_key", return_value="cancel"),
+        ):
+            _select_profile(console, self.config_path, 11, active_profile="one")
+        console.print(live.call_args.args[0])
+        text = output.getvalue()
+        self.assertIn("Profile", text)
+        self.assertIn("Associated paths", text)
+        self.assertIn("one (active)", text)
+        self.assertIn("~/logs/", text)
+        self.assertIn("/tmp/[ab]*.log", text)
+        self.assertIn("/tmp/other.log", text)
+        self.assertIn("/var/log/*.log", text)
+        self.assertRegex(text, r"empty\s+-")
+        self.assertRegex(text, r"\(default\)\s+-")
+
+    def test_selector_keeps_selected_profile_visible_with_multiline_paths(self):
+        self.config_path.write_text(
+            '[[profile_paths]]\nprofile = "one"\n'
+            'paths = ["/tmp/one", "/tmp/two", "/tmp/three"]\n'
+            "[profiles.one]\n[profiles.two]\n"
+        )
+        output = io.StringIO()
+        console = Console(file=output, color_system=None, width=80, height=9)
+        with (
+            patch("ctail.cli.Live") as live,
+            patch("ctail.cli._read_rule_key", side_effect=["down", "down", "cancel"]),
+        ):
+            self.assertIsNone(_select_profile(console, self.config_path, 11))
+        console.print(live.return_value.__enter__.return_value.update.call_args.args[0])
+        self.assertIn("two", output.getvalue())
+
+    def test_selector_shows_new_association_when_reopened(self):
+        self.config_path.write_text("[profiles.one]\n")
+        filename = str(self.root / "file.log")
+        output = io.StringIO()
+        console = Console(file=output, color_system=None, width=100)
+        with patch("ctail.cli._read_rule_key", side_effect=["f", "y"]):
+            _associate_profile(console, self.config_path, 11, filename, "one")
+        with (
+            patch("ctail.cli.Live") as live,
+            patch("ctail.cli._read_rule_key", return_value="cancel"),
+        ):
+            _select_profile(console, self.config_path, 11, source_file=filename)
+        output.seek(0)
+        output.truncate()
+        console.print(live.call_args.args[0])
+        self.assertIn(filename, output.getvalue())
+
 
 class ProfilePathPtyTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("less"), "less is required")
@@ -331,7 +391,7 @@ class ProfilePathPtyTests(unittest.TestCase):
                 wait_for(b"selected by file path")
                 os.write(master, b"c")
                 wait_for(b"Add rule")
-                os.write(master, b"\rscoped-rule\r" + b"\x1b[C" * 7 + b"\r")
+                os.write(master, b"\rscoped-rule\r" + b"\x1b[B" * 5 + b"\r")
                 wait_for(b"Added rule.")
                 os.write(master, b"p")
                 wait_for(b"Select profile")

@@ -154,8 +154,10 @@ with **c** are saved in `~/.config/ctail/rules.toml`. A named active profile
 is the default destination, but the editor can instead save a shared rule.
 Without an active named profile, new rules are shared.
 
-Press **p** to open the profile selector. **(default)** is the first option;
-use **Up/Down** and **Enter** to select a profile, or **Escape** to cancel.
+Press **p** to open the profile selector. The table shows each profile and its
+configured path patterns; a dash means there are no associated paths.
+**(default)** is the first option; use **Up/Down** and **Enter** to select a
+profile, or **Escape** to cancel.
 The **n** action shown below the profile list prompts for a name, saves a new
 empty profile in `ctail.toml`, and activates it as the saved profile. Selecting
 **(default)** removes `active_profile` from the configuration. Adding a rule
@@ -236,12 +238,17 @@ changing the running rule list.
 ### Rule editor
 
 The editor is also opened by **c** while following a log. Use **Left/Right**
-to select Pattern, Foreground, Background, Bold, Inverse, Style, Scope, Save or
-Cancel. For colors, **Up/Down** browse the named colors, including `default`
-and `none`; the selected Pattern, Foreground or Background field is marked
-with `>`, and nearby color choices are shown above and below it. To change
-Bold or Inverse, use **Left/Right** to select its label, then press
-**Up/Down** or **Enter** to toggle it. A preview shows the current style.
+to select Pattern, Foreground or Background. For colors, **Up/Down** browse
+the named colors, including `default` and `none`; nearby choices are shown
+above and below the selection. Press **Down** from Pattern or **Right** from
+Background to reach the options; **Up** from Bold returns to Background.
+Use **Up/Down** to select Bold, Inverse, Style, Scope, Save or Cancel.
+Use **Left/Right** or **Enter** to toggle Bold or Inverse. A preview shows the
+current style.
+Turning either attribute off removes it from the style; explicitly entered
+negative attributes are otherwise preserved.
+The controls and keyboard instructions are displayed on separate lines.
+Very short terminals use a compact layout.
 
 With Pattern selected, type directly and use **Backspace** to remove the last
 character. **Left/Right** still move between fields. For editing at a specific
@@ -253,7 +260,7 @@ remain in the editor until saved or canceled. Outside text-edit mode,
 validate and save; errors leave the editor open.
 
 New rules are literal and are inserted at the beginning of their selected
-scope. On Scope, use **Up/Down** or **Enter** to choose between the active
+scope. On Scope, use **Left/Right** or **Enter** to choose between the active
 named profile and **All profiles (shared)**. With no named profile, only the
 shared destination is available. Editing retains the selected rule's existing
 file, scope, priority, name, enabled state and literal/regex mode. Use the

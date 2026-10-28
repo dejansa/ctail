@@ -857,9 +857,9 @@ def _editor_change_style(state: _RuleEditorState, field: str, step: int) -> None
         else:
             background = None if name == "none" else name
     elif field == "Bold":
-        bold = not bool(bold)
+        bold = None if bold else True
     else:
-        reverse = not bool(reverse)
+        reverse = None if reverse else True
     state.color = str(Style(color=foreground, bgcolor=background, bold=bold, reverse=reverse))
 
 
@@ -883,7 +883,8 @@ def _render_rule_editor(console: Console, state: _RuleEditorState, profile: str 
     pattern_width = _EDITOR_COLUMN_WIDTH - 1
     for heading in ("Pattern", "Foreground", "Background"):
         table.add_column(heading, width=_EDITOR_COLUMN_WIDTH, overflow="ellipsis", no_wrap=True)
-    height = max(1, min(5, console.size.height - 9))
+    compact = console.size.height < 19
+    height = max(1, min(5, console.size.height - (9 if compact else 18)))
     center = height // 2
     fg_choices = _editor_color_choices(None if foreground == "none" else foreground)
     bg_choices = _editor_color_choices(None if background == "none" else background)
@@ -924,7 +925,6 @@ def _render_rule_editor(console: Console, state: _RuleEditorState, profile: str 
     scope = state.scope or "All profiles (shared)"
     if state.rule is not None:
         scope = state.rule.profile_name or ("shared" if Path(state.rule.source).name == "rules.toml" else "default")
-    controls = Text()
     values = {
         "Bold": ("on" if style.bold else "off") if style is not None else "-",
         "Inverse": ("on" if style.reverse else "off") if style is not None else "-",
@@ -933,35 +933,67 @@ def _render_rule_editor(console: Console, state: _RuleEditorState, profile: str 
             if state.editing and field == "Style" else state.color
         ),
         "Scope": scope,
-        "Save": "", "Cancel": "",
+        "Save": "",
+        "Cancel": "",
     }
-    for name in ("Bold", "Inverse", "Style", "Scope", "Save", "Cancel"):
-        if controls:
-            controls.append("  ")
+    def control(name: str) -> Text:
+        result = Text(">" if field == name else " ", style="bold")
         label = f"{name}: {values[name]}" if values[name] else name
-        if field == name:
-            controls.append(">", style="bold")
-        controls.append(label, style="reverse" if field == name else None)
+        result.append(label, style="reverse" if field == name else None)
+        return result
+
+    controls = [control(name) for name in ("Bold", "Inverse", "Style", "Scope", "Save", "Cancel")]
     try:
         preview_style = _split_colors(state.color)[0]
         Style.parse(preview_style)
         preview = Text(state.pattern or "Preview", style=preview_style, no_wrap=True)
     except (ColorParseError, StyleSyntaxError):
         preview = Text("Invalid style", style="bold red")
-    mode = (
-        "Editing text: Left/Right move  Backspace deletes  Enter accepts  Esc cancels"
-        if state.editing else
-        "Type pattern  Left/Right: field  Up/Down: change  Enter: edit/select  Esc: cancel"
+    instructions = (
+        ("Editing text", "Left/Right: move", "Backspace: delete", "Enter: accept", "Esc: cancel")
+        if state.editing else (
+            "Type pattern",
+            "Columns: Left/Right; colors: Up/Down",
+            "Options: Up/Down; values: Left/Right",
+            "Pattern Down / Background Right: options; Bold Up: columns",
+            "Enter: edit/select; Esc: cancel",
+        )
     )
     notice = "Complex style: use Style to edit it." if style is None else ""
     if state.rule and state.rule.source == "built-in":
         notice = "Built-in pattern is read-only. " + notice
     if state.rule is None and profile is None:
         notice = "No named profile is active; new rules are shared. " + notice
+    message = state.message or notice
+    if compact:
+        compact_controls = Text()
+        for item in controls:
+            if compact_controls:
+                compact_controls.append("  ")
+            compact_controls.append_text(item)
+        compact_instructions = (
+            ("Editing: Left/Right move; Backspace deletes; Enter accepts; Esc cancels", "")
+            if state.editing else (
+                "L/R: columns or values; U/D: colors or options; Enter: select; Esc: cancel",
+                "Pattern Down / Background Right: options; Bold Up: columns",
+            )
+        )
+        return Group(
+            table,
+            compact_controls,
+            Text("Preview: ") + preview,
+            *(Text(instruction, style="dim") for instruction in compact_instructions),
+            Text(message, style="yellow"),
+        )
     return Group(
-        table, controls, Text("Preview: ") + preview, Text(mode, style="dim"),
-        Text("Bold/Inverse: select with Left/Right, then Enter or Up/Down to toggle", style="dim"),
-        Text(state.message or notice, style="yellow"),
+        table,
+        Text(""),
+        *controls,
+        Text(""),
+        Text("Preview: ") + preview,
+        Text(""),
+        *(Text(instruction, style="dim") for instruction in instructions),
+        *([Text(message, style="yellow")] if message else []),
     )
 
 
@@ -1013,15 +1045,20 @@ def _rule_editor(
             else:
                 state.pattern += key
             continue
-        if key == "left":
-            state.field = max(0, state.field - 1)
-        elif key == "right":
-            state.field = min(len(_EDITOR_FIELDS) - 1, state.field + 1)
-        elif key in ("up", "down"):
-            if field in ("Foreground", "Background", "Bold", "Inverse"):
-                _editor_change_style(state, field, -1 if key == "up" else 1)
+        if key in ("left", "right"):
+            if state.field <= 2:
+                state.field = max(0, min(3, state.field + (-1 if key == "left" else 1)))
+            elif field in ("Bold", "Inverse"):
+                _editor_change_style(state, field, -1 if key == "left" else 1)
             elif field == "Scope" and rule is None and profile is not None:
                 state.scope = None if state.scope is not None else profile
+        elif key in ("up", "down"):
+            if field in ("Foreground", "Background"):
+                _editor_change_style(state, field, -1 if key == "up" else 1)
+            elif field == "Pattern" and key == "down":
+                state.field = 3
+            elif state.field >= 3:
+                state.field = max(2, min(len(_EDITOR_FIELDS) - 1, state.field + (-1 if key == "up" else 1)))
         elif key == "enter":
             if field == "Cancel":
                 return "Canceled."
@@ -1062,31 +1099,58 @@ def _select_profile(
     source_file: str | None = None,
 ) -> tuple[bool | str, str | None] | None:
     config = _read_toml(config_path) if config_path.exists() else {}
-    choices: list[str | None] = [None, *sorted(
-        _parse_rule_profiles(config, config_path, allow_builtins=True)
-    )]
+    profiles = _parse_rule_profiles(config, config_path, allow_builtins=True)
+    _parse_profile_paths(config, config_path, profiles)
+    choices: list[str | None] = [None, *sorted(profiles)]
+    paths_by_profile: dict[str, list[str]] = {name: [] for name in profiles}
+    for mapping in config.get("profile_paths", []):
+        paths_by_profile[mapping["profile"]].extend(mapping["paths"])
     selected = 0
     message = ""
 
     def render() -> Group:
-        table = Table(title="Select profile", show_header=False, box=None)
-        table.add_column("Profile")
-        page_size = max(1, console.size.height - 8)
-        start = (selected // page_size) * page_size
-        for index in range(start, min(start + page_size, len(choices))):
-            name = "(default)" if choices[index] is None else choices[index]
-            row = Text(name)
-            if choices[index] == active_profile:
-                row.append(" (active)", style="bold green")
-            if index == selected:
-                row.stylize("reverse")
-            table.add_row(row)
-        actions = "n  Add a new profile"
+        def make_table(start: int, end: int) -> Table:
+            table = Table(title="Select profile", box=None)
+            table.add_column("Profile")
+            table.add_column("Associated paths")
+            for index in range(start, end):
+                profile = choices[index]
+                name = Text("(default)" if profile is None else profile)
+                if profile == active_profile:
+                    name.append(" (active)", style="bold green")
+                paths = Text("\n".join(paths_by_profile[profile]) if profile else "-")
+                if not paths:
+                    paths.append("-")
+                if index == selected:
+                    name.stylize("reverse")
+                    paths.stylize("reverse")
+                table.add_row(name, paths)
+            return table
+
+        start, end = selected, selected + 1
+        max_table_height = max(1, console.size.height - 4)
+        while start > 0:
+            candidate = make_table(start - 1, end)
+            if len(console.render_lines(candidate, pad=False)) > max_table_height:
+                break
+            start -= 1
+        while end < len(choices):
+            candidate = make_table(start, end + 1)
+            if len(console.render_lines(candidate, pad=False)) > max_table_height:
+                break
+            end += 1
+        table = make_table(start, end)
+        actions = "n: Add a new profile"
         if source_file is not None:
-            actions += "    a  Associate selected profile with this file or directory"
+            actions += "\na: Associate selected profile with this file or directory"
         return Group(
-            table, Text(actions, style="dim"), Text(message, style="yellow"),
-            Text("Up/Down: select  Enter: apply  Escape: cancel", style="dim"),
+            table,
+            Text(""),
+            Text(actions, style="dim"),
+            Text(message, style="yellow"),
+            Text("Up/Down: select", style="dim"),
+            Text("Enter: apply", style="dim"),
+            Text("Esc: cancel", style="dim"),
             Text(f"{selected + 1}/{len(choices)}", style="dim"),
         )
 
@@ -1269,7 +1333,14 @@ def _render_rule_manager(
     position = f"{selected + 1}/{len(rules)}" if rules else "0/0"
     return Group(
         Constrain(table, width=100),
-        Text("Up/Down: select  a: add  e: edit  d: enable/disable  x: remove  m: move  Esc: close", style="dim"),
+        Text(""),
+        Text("Up/Down: select", style="dim"),
+        Text("a: add", style="dim"),
+        Text("e: edit", style="dim"),
+        Text("d: enable/disable", style="dim"),
+        Text("x: remove", style="dim"),
+        Text("m: move", style="dim"),
+        Text("Esc: close", style="dim"),
         Text(message, style="yellow"),
         Text(position, style="dim"),
     )
