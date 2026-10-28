@@ -145,8 +145,8 @@ Built-in rules color `[ERROR]`/`[FATAL]`, `[WARN]`/`[WARNING]`, `[INFO]`, and
 When following a file in an interactive terminal, press **Space** to
 pause/resume, **Enter** to print a blank line and visually separate log output,
 **p** to select a coloring-rule profile, **f** to toggle whether unmatched
-lines are shown, **c** to add a literal text/color rule, **r** to remove a
-custom rule, **d** to enable/disable any rule, **?** to show the interactive
+lines are shown, **c** to add a literal text/color rule, **r** to open the
+rules manager, **?** to show the interactive
 command list, or **q** to quit. The
 **f** toggle applies only to the current run; it does not change
 `ctail.toml`. The help panel closes when any key is pressed. Rules created
@@ -201,17 +201,30 @@ optional name, pattern, and style rendered in its configured colors.
 These listing commands exit without reading stdin or starting `tail`. Colors
 are shown in a terminal; redirected output and `--no-color` produce plain text.
 
-## Removing and disabling rules
+## Managing rules
 
-While following a file, press **r** to list removable rules from both
-`rules.toml` and `ctail.toml`. Use **Up/Down** to select a rule and **Enter**
-to delete its TOML entry permanently. Built-in rules cannot be deleted.
+While following a file, press **r** to open the rules manager. It lists the
+current profile's effective rules in priority order, including shared ad-hoc
+rules, disabled rules and built-ins. Columns show status, source, profile,
+type, name, pattern and style. The table fits its contents up to 100 columns;
+long fields may be truncated to fit the table or a narrow terminal.
+Use **Up/Down** to select a rule:
 
-Press **d** to list all rules, including built-ins and disabled rules.
-Use **Up/Down** and **Enter** to toggle the selected rule's enabled/disabled
-state. Press **Escape** in either selector to cancel without changing anything.
-Log consumption pauses while a selector is open and resumes afterward, retaining
-the previous pause/resume state.
+- **d** toggles the selected rule's enabled/disabled state.
+- **x** removes a custom rule after confirmation. Built-ins cannot be removed.
+- **m** moves an ad-hoc `rules.toml` rule to a named profile or to
+  **All profiles (shared)**. The current named profile is selected initially;
+  without one, the shared destination is selected. Confirm the scope change.
+  Moving to the existing scope changes nothing.
+- **Escape** cancels a pending action or closes the manager.
+
+Moving a rule changes its scope within `rules.toml`; a shared rule applies to
+every profile, while a named-profile rule applies only to that profile. A move
+places the rule first in its destination scope, which can change match priority.
+There is no ad-hoc scope exclusive to the default profile. Rules moved to a
+different profile disappear from the current effective list. Log consumption
+pauses while the manager is open and resumes afterward, retaining the previous
+pause/resume state.
 
 Changes apply immediately to subsequent log lines and persist across restarts.
 Custom rules are changed in their own source file; existing comments, other
@@ -283,10 +296,10 @@ printf '%s\n' '2026-10-22 11:00:02 [DEBUG] example detail' >> /tmp/ctail-demo.lo
 ```
 
 While `ctail` is following the file, press **Space** to pause/resume, **c** to
-enter a literal string and Rich color for a persisted ad-hoc rule, **r** to
-remove a rule, **d** to enable/disable a rule, **?** to open the help panel,
-and **q** to quit. In the selectors, check arrow-key navigation, **Escape**
-cancellation, and **Enter** to apply;
+enter a literal string and Rich color for a persisted ad-hoc rule, **r** to open
+the rules manager, **?** to open the help panel, and **q** to quit. In the
+manager, check arrow-key navigation, **d** to toggle, **x** to remove, **m** to
+move an ad-hoc rule, confirmation and **Escape** cancellation;
 restart the app or run `ctail --show-rules` to verify the saved state.
 Interactive keys are available when following a file in a terminal;
 they are not used when input is piped. Remove the sample file afterward with

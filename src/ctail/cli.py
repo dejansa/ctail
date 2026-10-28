@@ -17,6 +17,7 @@ from typing import Any, BinaryIO, TextIO
 
 import tomlkit
 from rich.color import ANSI_COLOR_NAMES, ColorParseError
+from rich.constrain import Constrain
 from rich.console import Console, Group
 from rich.errors import StyleSyntaxError
 from rich.live import Live
@@ -24,7 +25,7 @@ from rich.style import Style
 from rich.table import Table
 from rich.text import Text
 from tomlkit.exceptions import ParseError
-from tomlkit.items import AoT, Array
+from tomlkit.items import AoT, Array, InlineTable, Table as TOMLTable
 from tomlkit.toml_document import TOMLDocument
 
 
@@ -507,6 +508,16 @@ def _read_rule_document(
     _parse_rule_profiles(
         data, path, allow_builtins=path.name == "ctail.toml"
     )
+    return document, _rule_entries(document, path, profile_name, create_profile=create_profile)
+
+
+def _rule_entries(
+    document: TOMLDocument,
+    path: Path,
+    profile_name: str | None,
+    *,
+    create_profile: bool = False,
+) -> AoT | Array:
     if profile_name is None:
         if "rules" not in document:
             document["rules"] = tomlkit.aot()
@@ -527,7 +538,7 @@ def _read_rule_document(
     if not isinstance(entries, (AoT, Array)):
         section = f"profile {profile_name!r} " if profile_name is not None else ""
         raise TypeError(f"{path}: {section}'rules' must be an array of tables")
-    return document, entries
+    return entries
 
 
 def _save_rule_document(path: Path, document: TOMLDocument) -> None:
@@ -651,7 +662,8 @@ def _change_rule(
     if rule not in current_rules:
         raise ValueError("Rules changed on disk; restart ctail before editing this rule.")
     path = rules_path.with_name("ctail.toml") if rule.source == "built-in" else Path(rule.source)
-    document, entries = _read_rule_document(path, rule.profile_name)
+    scope = profile if rule.source == "built-in" and rule.source_index is None else rule.profile_name
+    document, entries = _read_rule_document(path, scope)
     if rule.source_index is None:
         if rule.source != "built-in":
             raise ValueError("Rule has no saved TOML entry.")
@@ -665,6 +677,46 @@ def _change_rule(
     else:
         entries[rule.source_index]["disabled"] = not rule.disabled
     _save_rule_document(path, document)
+
+
+def _move_ad_hoc_rule(
+    rule: ColorRule,
+    rules_path: Path,
+    destination: str | None,
+    *,
+    profile: str | None = None,
+) -> bool:
+    if rule.source == "built-in" or Path(rule.source).resolve() != rules_path.resolve():
+        raise ValueError("Only ad-hoc rules from rules.toml can be moved.")
+    if rule.source_index is None:
+        raise ValueError("Rule has no saved TOML entry.")
+    _, current_rules, _ = _load_settings(rules_path.parent, profile)
+    if rule not in current_rules:
+        raise ValueError("Rules changed on disk; restart ctail before editing this rule.")
+    config_path = rules_path.with_name("ctail.toml")
+    config = _read_toml(config_path) if config_path.exists() else {}
+    profiles = _parse_rule_profiles(config, config_path, allow_builtins=True)
+    if destination is not None and destination not in profiles:
+        raise ValueError(f"Profile {destination!r} no longer exists.")
+    if rule.profile_name == destination:
+        return False
+
+    document, source = _read_rule_document(rules_path, rule.profile_name)
+    target = _rule_entries(
+        document, rules_path, destination, create_profile=destination is not None
+    )
+    entry = source.pop(rule.source_index)
+    if isinstance(target, AoT) and not isinstance(entry, TOMLTable):
+        converted = tomlkit.table()
+        converted.update(entry.unwrap())
+        entry = converted
+    elif isinstance(target, Array) and not isinstance(entry, InlineTable):
+        converted = tomlkit.inline_table()
+        converted.update(entry.unwrap())
+        entry = converted
+    target.insert(0, entry)
+    _save_rule_document(rules_path, document)
+    return True
 
 
 def _add_rule(
@@ -905,44 +957,74 @@ def _manage_profiles(
         return selected_profile
 
 
-def _select_rule(
-    console: Console, rules: list[ColorRule], keyboard_fd: int, *, delete: bool
-) -> ColorRule | None:
-    choices = [rule for rule in rules if not delete or rule.source != "built-in"]
-    if not choices:
-        console.print("No removable rules.", style="dim")
-        return None
-    selected = 0
+def _render_rule_manager(
+    console: Console, rules: list[ColorRule], selected: int, message: str
+) -> Group:
+    table = Table(title="Rules manager", box=None, padding=(0, 1))
+    for heading, minimum, maximum in (
+        ("", 1, 1), ("Status", 8, 8), ("Source", 10, 12), ("Profile", 7, 16),
+        ("Type", 7, 7), ("Name", 4, 24), ("Pattern", 8, 40), ("Style", 6, 20),
+    ):
+        table.add_column(
+            heading, min_width=minimum, max_width=maximum,
+            no_wrap=heading not in {"Name", "Pattern"}, overflow="ellipsis",
+        )
+    page_size = max(1, console.size.height - 6)
+    start = (selected // page_size) * page_size
+    for index in range(start, min(start + page_size, len(rules))):
+        rule = rules[index]
+        source = "built-in" if rule.source == "built-in" else Path(rule.source).name
+        style = rule.group_colors[0] if rule.group_colors else rule.color
+        cells = [
+            Text(">" if index == selected else " "),
+            Text("disabled" if rule.disabled else "enabled"),
+            Text(source),
+            Text(rule.profile_name or ("shared" if source == "rules.toml" else "-")),
+            Text("regex" if rule.regex_enabled else "literal"),
+            Text(rule.name or "-", no_wrap=True),
+            Text(repr(rule.pattern), style=style, no_wrap=True),
+            Text(rule.color, style=style),
+        ]
+        if index == selected:
+            for cell in cells:
+                cell.stylize("reverse")
+        table.add_row(*cells)
+    position = f"{selected + 1}/{len(rules)}" if rules else "0/0"
+    return Group(
+        Constrain(table, width=100),
+        Text("Up/Down: select  d: enable/disable  x: remove  m: move  Esc: close", style="dim"),
+        Text(message, style="yellow"),
+        Text(position, style="dim"),
+    )
 
-    def render() -> Text:
-        action = "Delete rule" if delete else "Enable/disable rule"
-        view = Text(f"{action}\nUp/Down: select  Enter: apply  Escape: cancel\n\n")
-        page_size = max(1, console.size.height - 5)
-        start = (selected // page_size) * page_size
-        for index in range(start, min(start + page_size, len(choices))):
-            rule = choices[index]
-            source = "built-in" if rule.source == "built-in" else Path(rule.source).name
-            if rule.profile_name is not None:
-                source = f"{source} ({rule.profile_name})"
-            row = Text(
-                f"{'> ' if index == selected else '  '}"
-                f"[{'disabled' if rule.disabled else 'enabled'}] {source} "
-                f"({'regex' if rule.regex_enabled else 'literal'}): "
+
+def _manage_rules(
+    console: Console, rules: list[ColorRule], rules_path: Path,
+    keyboard_fd: int, *, profile: str | None = None,
+) -> None:
+    selected = 0
+    message = ""
+    mode = "list"
+    destinations: list[str | None] = []
+    destination_index = 0
+
+    def render() -> Group:
+        if mode == "move":
+            table = Table(title="Move ad-hoc rule to", box=None, show_header=False)
+            table.add_column("Destination")
+            page_size = max(1, console.size.height - 5)
+            start = (destination_index // page_size) * page_size
+            for index in range(start, min(start + page_size, len(destinations))):
+                name = destinations[index] or "All profiles (shared)"
+                row = Text(f"{'> ' if index == destination_index else '  '}{name}")
+                if index == destination_index:
+                    row.stylize("reverse")
+                table.add_row(row)
+            return Group(
+                table, Text("Up/Down: select  Enter: choose  Esc: cancel", style="dim"),
+                Text(f"{destination_index + 1}/{len(destinations)}", style="dim"),
             )
-            if rule.name:
-                row.append(f"{rule.name}: ")
-            row.append(
-                repr(rule.pattern),
-                style=rule.group_colors[0] if rule.group_colors else rule.color,
-            )
-            row.append(f" ({rule.color})")
-            row.truncate(max(1, console.size.width - 1), overflow="ellipsis")
-            if index == selected:
-                row.stylize("reverse")
-            view.append_text(row)
-            view.append("\n")
-        view.append(f"\n{selected + 1}/{len(choices)}")
-        return view
+        return _render_rule_manager(console, rules, selected, message)
 
     with Live(
         render(), console=console, screen=True, transient=True,
@@ -951,33 +1033,86 @@ def _select_rule(
         while True:
             key = _read_rule_key(keyboard_fd)
             if key == "cancel":
-                return None
-            if key == "enter":
-                return choices[selected]
-            if key == "up":
+                if mode == "list":
+                    return
+                mode, message = "list", "Canceled."
+            elif mode == "move":
+                if key == "up":
+                    destination_index = max(0, destination_index - 1)
+                elif key == "down":
+                    destination_index = min(len(destinations) - 1, destination_index + 1)
+                elif key == "enter":
+                    destination = destinations[destination_index]
+                    if destination == rules[selected].profile_name:
+                        mode, message = "list", "Rule is already in that scope."
+                    else:
+                        label = destination or "all profiles (shared)"
+                        mode, message = "confirm_move", f"Move rule to {label}? y: confirm  n: cancel"
+            elif mode in ("confirm_delete", "confirm_move"):
+                if key.lower() == "n":
+                    mode, message = "list", "Canceled."
+                elif key.lower() == "y":
+                    rule = rules[selected]
+                    action = mode
+                    try:
+                        if action == "confirm_delete":
+                            _change_rule(rule, rules_path, delete=True, profile=profile)
+                        else:
+                            _move_ad_hoc_rule(
+                                rule, rules_path, destinations[destination_index], profile=profile
+                            )
+                    except (OSError, TypeError, ValueError) as error:
+                        mode, message = "list", f"Could not change color rule: {error}"
+                    else:
+                        try:
+                            _, loaded_rules, _ = _load_settings(rules_path.parent, profile)
+                        except (OSError, TypeError, ValueError) as error:
+                            mode, message = "list", f"Rule saved but could not reload: {error}"
+                            live.update(render(), refresh=True)
+                            continue
+                        rules[:] = loaded_rules
+                        selected = min(selected, max(0, len(rules) - 1))
+                        mode = "list"
+                        message = "Deleted rule." if action == "confirm_delete" else "Moved rule."
+            elif key == "up":
                 selected = max(0, selected - 1)
             elif key == "down":
-                selected = min(len(choices) - 1, selected + 1)
+                selected = min(len(rules) - 1, selected + 1) if rules else 0
+            elif rules and key.lower() == "d":
+                rule = rules[selected]
+                try:
+                    _change_rule(rule, rules_path, delete=False, profile=profile)
+                except (OSError, TypeError, ValueError) as error:
+                    message = f"Could not change color rule: {error}"
+                else:
+                    try:
+                        _, loaded_rules, _ = _load_settings(rules_path.parent, profile)
+                    except (OSError, TypeError, ValueError) as error:
+                        message = f"Rule saved but could not reload: {error}"
+                    else:
+                        rules[:] = loaded_rules
+                        message = "Enabled rule." if rule.disabled else "Disabled rule."
+            elif rules and key.lower() == "x":
+                if rules[selected].source == "built-in":
+                    message = "Built-in rules cannot be deleted; disable them instead."
+                else:
+                    mode, message = "confirm_delete", "Delete selected rule? y: confirm  n: cancel"
+            elif rules and key.lower() == "m":
+                rule = rules[selected]
+                if rule.source == "built-in" or Path(rule.source).resolve() != rules_path.resolve():
+                    message = "Only ad-hoc rules from rules.toml can be moved."
+                else:
+                    try:
+                        config_path = rules_path.with_name("ctail.toml")
+                        config = _read_toml(config_path) if config_path.exists() else {}
+                        profiles = _parse_rule_profiles(config, config_path, allow_builtins=True)
+                    except (OSError, TypeError, ValueError) as error:
+                        message = f"Could not list profiles: {error}"
+                    else:
+                        destinations = [None, *sorted(profiles)]
+                        destination_index = destinations.index(profile) if profile in destinations else 0
+                        mode, message = "move", ""
             live.update(render(), refresh=True)
-
-
-def _manage_rules(
-    console: Console, rules: list[ColorRule], rules_path: Path,
-    keyboard_fd: int, *, delete: bool, profile: str | None = None,
-) -> None:
-    rule = _select_rule(console, rules, keyboard_fd, delete=delete)
-    if rule is None:
-        console.print("Canceled.", style="dim")
-        return
-    try:
-        _change_rule(rule, rules_path, delete=delete, profile=profile)
-        _, loaded_rules, _ = _load_settings(rules_path.parent, profile)
-    except (OSError, TypeError, ValueError) as error:
-        console.print(Text(f"Could not change color rule: {error}", style="bold red"))
-        return
-    rules[:] = loaded_rules
-    action = "Deleted" if delete else ("Enabled" if rule.disabled else "Disabled")
-    console.print(Text(f"{action} rule for {rule.pattern!r}.", style="dim"))
 
 
 def _show_interactive_help(console: Console, keyboard_fd: int) -> None:
@@ -988,8 +1123,7 @@ def _show_interactive_help(console: Console, keyboard_fd: int) -> None:
     commands.add_row("Space", "Pause or resume log output")
     commands.add_row("c", "Add a literal color rule")
     commands.add_row("f", "Toggle display of unmatched lines")
-    commands.add_row("r", "Select and remove a custom rule")
-    commands.add_row("d", "Select a rule and enable or disable it")
+    commands.add_row("r", "Open the rules manager")
     commands.add_row("?", "Show this command list")
     commands.add_row("q", "Quit ctail")
     help_view = Group(
@@ -1050,10 +1184,9 @@ def _consume_stream(
                     console, rules, rules_path, keyboard_fd, original_terminal,
                     active_profile,
                 )
-            elif key in (b"r", b"R", b"d", b"D") and rules_path is not None:
+            elif key in (b"r", b"R") and rules_path is not None:
                 _manage_rules(
-                    console, rules, rules_path, keyboard_fd,
-                    delete=key in (b"r", b"R"), profile=active_profile,
+                    console, rules, rules_path, keyboard_fd, profile=active_profile,
                 )
             elif key == b"?":
                 _show_interactive_help(console, keyboard_fd)
@@ -1190,8 +1323,7 @@ def main() -> None:
             "  Space  Pause or resume log output\n"
             "  p      Select a coloring-rule profile (n adds one)\n"
             "  c      Add a literal color rule\n"
-            "  r      Select and remove a custom rule\n"
-            "  d      Select a rule and enable or disable it\n"
+            "  r      Open the rules manager\n"
             "  ?      Show the interactive command list\n"
             "  q      Quit ctail"
         ),
@@ -1298,8 +1430,8 @@ def main() -> None:
             active_terminal[6][termios.VTIME] = 0
             termios.tcsetattr(keyboard_fd, termios.TCSADRAIN, active_terminal)
             console.print(
-                "Enter: blank line  Space: pause/resume  p: profile  c: add rule  r: remove rule  "
-                "d: enable/disable rule  ?: help  q: quit", style="dim",
+                "Enter: blank line  Space: pause/resume  p: profile  c: add rule  "
+                "r: rules manager  ?: help  q: quit", style="dim",
             )
             if automatic_profile:
                 console.print(Text(
