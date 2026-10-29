@@ -1,6 +1,6 @@
 [project]
 name = "ctail"
-version = "0.1.4"
+version = "0.1.5"
 description = "Tail log output with configurable, fine-grained terminal colors"
 readme = "README.md"
 authors = [
