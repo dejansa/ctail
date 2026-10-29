@@ -387,7 +387,7 @@ class ProfilePathPtyTests(unittest.TestCase):
                 wait_for(b"selected by file path")
                 os.write(master, b"c")
                 wait_for(b"Add rule")
-                os.write(master, b"\rscoped-rule\r" + b"\x1b[B" * 6 + b"\r")
+                os.write(master, b"\rscoped-rule\r\x1b[C\r")
                 wait_for(b"Added rule.")
                 os.write(master, b"p")
                 wait_for(b"Select profile")

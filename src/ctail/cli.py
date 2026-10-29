@@ -686,6 +686,7 @@ def _write_ad_hoc_rule(
     profile_name: str | None = None,
     *,
     regex_enabled: bool = False,
+    shared: bool = True,
 ) -> None:
     path = _scope_path(path, profile_name)
     document, entries = _read_rule_document(
@@ -693,7 +694,7 @@ def _write_ad_hoc_rule(
     )
     entry = tomlkit.inline_table() if isinstance(entries, Array) else tomlkit.table()
     entry.update({"pattern": pattern, "color": color, "regex": regex_enabled, "disabled": False})
-    if profile_name is None:
+    if profile_name is None and shared:
         entry["shared"] = True
     entries.insert(0, entry)
     _save_rule_document(path, document)
@@ -889,12 +890,18 @@ def _read_rule_key(keyboard_fd: int) -> str:
     return key.decode("utf-8", errors="replace")
 
 
+_BASIC_EDITOR_COLORS = ("none", "black", "white", "red", "green", "blue", "yellow", "magenta", "cyan")
 _EDITOR_COLORS = ("none", *sorted({"default", *ANSI_COLOR_NAMES}))
+_ADD_EDITOR_COLORS = (*_BASIC_EDITOR_COLORS, *(
+    color for color in _EDITOR_COLORS if color not in _BASIC_EDITOR_COLORS
+))
 _EDITOR_COLUMN_WIDTH = max(cell_len(name) for name in _EDITOR_COLORS) + 1
 _EDITOR_PATTERN_WIDTH = 55
+_ADD_EDITOR_FIELDS = ("Pattern", "Foreground", "Background", "Mode")
+_REGEX_METACHARACTERS = frozenset(r".^$*+?{}[]\|()")
 _EDITOR_FIELDS = (
-    "Pattern", "Foreground", "Background", "Bold", "Inverse", "Style", "Scope",
-    "Mode", "Save", "Cancel",
+    "Pattern", "Foreground", "Background", "Bold", "Inverse", "Scope", "Save",
+    "Cancel", "Mode", "Style",
 )
 
 
@@ -923,14 +930,16 @@ def _editor_style(color: str) -> Style | None:
     return style if style == simple else None
 
 
-def _editor_color_choices(color: str | None) -> list[str]:
-    choices = list(_EDITOR_COLORS)
+def _editor_color_choices(color: str | None, *, adding: bool = False) -> list[str]:
+    choices = list(_ADD_EDITOR_COLORS if adding else _EDITOR_COLORS)
     if color is not None and color not in choices:
         choices.insert(1, color)
     return choices
 
 
-def _editor_change_style(state: _RuleEditorState, field: str, step: int) -> None:
+def _editor_change_style(
+    state: _RuleEditorState, field: str, step: int, *, adding: bool = False
+) -> None:
     style = _editor_style(state.color)
     if style is None:
         state.message = "Complex style: edit Style directly before using color controls."
@@ -940,7 +949,7 @@ def _editor_change_style(state: _RuleEditorState, field: str, step: int) -> None
     bold, reverse = style.bold, style.reverse
     if field in ("Foreground", "Background"):
         current = foreground if field == "Foreground" else background
-        choices = _editor_color_choices(current)
+        choices = _editor_color_choices(current, adding=adding)
         index = choices.index(current or "none")
         name = choices[max(0, min(len(choices) - 1, index + step))]
         if field == "Foreground":
@@ -965,8 +974,10 @@ def _editor_text_window(text: str, cursor: int, width: int) -> str:
     return ("<" if start else "") + value[start:end] + (">" if end < len(value) else "")
 
 
-def _render_rule_editor(console: Console, state: _RuleEditorState, profile: str | None) -> Group:
-    field = _EDITOR_FIELDS[state.field]
+def _render_editor_table(
+    console: Console, state: _RuleEditorState, *, adding: bool, rows: int = 5
+) -> Table:
+    field = (_ADD_EDITOR_FIELDS if adding else _EDITOR_FIELDS)[state.field]
     style = _editor_style(state.color)
     foreground = style.color.name if style and style.color else "none"
     background = style.bgcolor.name if style and style.bgcolor else "none"
@@ -982,11 +993,10 @@ def _render_rule_editor(console: Console, state: _RuleEditorState, profile: str 
         ("Background", color_width),
     ):
         table.add_column(heading, width=width, overflow="ellipsis", no_wrap=True)
-    compact = console.size.height < 20
-    height = max(1, min(5, console.size.height - (9 if compact else 19)))
+    height = rows
     center = height // 2
-    fg_choices = _editor_color_choices(None if foreground == "none" else foreground)
-    bg_choices = _editor_color_choices(None if background == "none" else background)
+    fg_choices = _editor_color_choices(None if foreground == "none" else foreground, adding=adding)
+    bg_choices = _editor_color_choices(None if background == "none" else background, adding=adding)
     fg_index, bg_index = fg_choices.index(foreground), bg_choices.index(background)
     for row in range(height):
         offset = row - center
@@ -1003,9 +1013,11 @@ def _render_rule_editor(console: Console, state: _RuleEditorState, profile: str 
             (fg_choices, fg_index, field == "Foreground", False),
             (bg_choices, bg_index, field == "Background", True),
         ):
-            position = index + offset
+            start = max(0, min(index - center, len(choices) - height))
+            position = start + row if adding else index + offset
             name = choices[position] if 0 <= position < len(choices) else ""
-            cell = Text(">" if active and offset == 0 else " ", style="bold")
+            selected = position == index if adding else offset == 0
+            cell = Text(">" if active and selected else " ", style="bold")
             sample_style = None
             if name and name != "none":
                 if is_background:
@@ -1021,6 +1033,52 @@ def _render_rule_editor(console: Console, state: _RuleEditorState, profile: str 
             cell.append(name, style=sample_style)
             cells.append(cell)
         table.add_row(*cells)
+    return table
+
+
+def _fit_editor_view(
+    console: Console, state: _RuleEditorState, *, adding: bool,
+    controls: list[Text], mode: Text, style: Text, preview: Text,
+    instructions: tuple[str, ...], message: str,
+) -> Group:
+    rows = 5
+    title = True
+    show_table = True
+    help_lines = list(instructions)
+
+    def render() -> Group:
+        table = _render_editor_table(console, state, adding=adding, rows=rows)
+        if not title:
+            table.title = None
+        return Group(
+            *([table] if show_table else []), *controls, mode, style, preview, Text(""),
+            *(Text(line, style="dim") for line in help_lines),
+            *([Text(message, style="yellow")] if message else []),
+        )
+
+    def fits(view: Group) -> bool:
+        return len(console.render_lines(view, options=console.options, pad=False)) <= console.size.height
+
+    view = render()
+    while rows > 1 and not fits(view):
+        rows -= 1
+        view = render()
+    if not adding and console.size.height <= 8 and not fits(view):
+        title = False
+        view = render()
+    while help_lines and not fits(view):
+        help_lines.pop()
+        view = render()
+    if message and not fits(view):
+        show_table = False
+        view = render()
+    return view
+
+
+def _render_rule_editor(console: Console, state: _RuleEditorState, profile: str | None) -> Group:
+    field = _EDITOR_FIELDS[state.field]
+    style = _editor_style(state.color)
+    compact = console.size.height < 20
     scope = state.scope or "All profiles (shared)"
     if state.rule is not None:
         scope = state.rule.profile_name or ("shared" if state.rule.shared else "default")
@@ -1042,7 +1100,7 @@ def _render_rule_editor(console: Console, state: _RuleEditorState, profile: str 
         result.append(label, style="reverse" if field == name else None)
         return result
 
-    controls = [control(name) for name in ("Bold", "Inverse", "Style", "Scope", "Mode", "Save", "Cancel")]
+    controls = [control(name) for name in ("Bold", "Inverse", "Scope", "Save", "Cancel")]
     try:
         preview_style = _split_colors(state.color)[0]
         Style.parse(preview_style)
@@ -1062,8 +1120,6 @@ def _render_rule_editor(console: Console, state: _RuleEditorState, profile: str 
     notice = "Complex style: use Style to edit it." if style is None else ""
     if state.rule and state.rule.source == "built-in":
         notice = "Built-in pattern and regex mode are read-only. " + notice
-    if state.rule is None and profile is None:
-        notice = "No named profile is active; new rules are shared. " + notice
     message = state.message or notice
     if compact:
         compact_controls = Text()
@@ -1078,23 +1134,146 @@ def _render_rule_editor(console: Console, state: _RuleEditorState, profile: str 
                 "Pattern + Down or Background + Right: select Bold; Bold + Up: Background",
             )
         )
-        return Group(
-            table,
-            compact_controls,
-            Text("Preview: ") + preview,
-            *(Text(instruction, style="dim") for instruction in compact_instructions),
-            Text(message, style="yellow"),
-        )
-    return Group(
-        table,
-        Text(""),
-        *controls,
-        Text(""),
-        Text("Preview: ") + preview,
-        Text(""),
-        *(Text(instruction, style="dim") for instruction in instructions),
-        *([Text(message, style="yellow")] if message else []),
+        controls = [compact_controls]
+        instructions = compact_instructions
+    else:
+        controls = [Text(""), *controls]
+    return _fit_editor_view(
+        console, state, adding=False, controls=controls,
+        mode=control("Mode"), style=control("Style"), preview=Text("Preview: ") + preview,
+        instructions=instructions, message=message,
     )
+
+
+def _render_add_rule_editor(console: Console, state: _RuleEditorState) -> Group:
+    field = _ADD_EDITOR_FIELDS[state.field]
+    compact = console.size.height < 12
+    mode = Text(">" if field == "Mode" else " ", style="bold")
+    mode.append(f"Mode: {'regex' if state.regex_enabled else 'literal'}",
+                style="reverse" if field == "Mode" else None)
+    style = Text(f" Style: {state.color}")
+    preview = Text(state.pattern or "Preview", style=state.color, no_wrap=True)
+    if state.editing and compact:
+        instructions = (
+            "Editing: Left/Right move; Backspace deletes",
+            "Enter: accept; Esc: discard text",
+        )
+    elif state.editing:
+        instructions = (
+            "Editing pattern: Left/Right move; Backspace deletes",
+            "Enter: accept text; Esc: discard text",
+        )
+    elif compact:
+        instructions = (
+            "Pattern Down: mode; Esc: back; arrows move",
+            "FG b:bold BG i:inverse Enter:toggle/save",
+        )
+    else:
+        instructions = (
+            "Arrows: fields/colors; Pattern Down: mode; Mode Enter: toggle; Up: colors",
+            "Foreground b: bold; Background i: inverse; Color Enter: save; Esc: discard",
+        )
+    if compact and state.message:
+        instructions = ()
+    return _fit_editor_view(
+        console, state, adding=True, controls=[], mode=mode, style=style,
+        preview=Text("Preview: ") + preview, instructions=instructions, message=state.message,
+    )
+
+
+def _save_editor_rule(
+    state: _RuleEditorState, rules: list[ColorRule], rules_path: Path, profile: str | None
+) -> str | None:
+    rule = state.rule
+    try:
+        _load_settings(rules_path.parent, profile)
+        if rule is None:
+            _write_ad_hoc_rule(
+                rules_path, state.pattern, state.color, profile,
+                regex_enabled=state.regex_enabled, shared=False,
+            )
+        else:
+            _edit_rule(
+                rule, rules_path, state.pattern, state.color,
+                profile=profile, regex_enabled=state.regex_enabled,
+            )
+    except (OSError, TypeError, ValueError) as error:
+        state.message = f"Could not save rule: {error}"
+        return None
+    try:
+        _, loaded_rules, _ = _load_settings(rules_path.parent, profile)
+    except (OSError, TypeError, ValueError) as error:
+        return f"Rule saved but could not reload: {error}"
+    rules[:] = loaded_rules
+    return "Edited rule." if rule else "Added rule."
+
+
+def _add_rule_editor(
+    console: Console, live: Live, rules: list[ColorRule], rules_path: Path,
+    keyboard_fd: int, profile: str | None,
+) -> str:
+    state = _RuleEditorState("", "none", profile, None)
+    original_mode = False
+    while True:
+        live.update(_render_add_rule_editor(console, state), refresh=True)
+        key = _read_rule_key(keyboard_fd)
+        field = _ADD_EDITOR_FIELDS[state.field]
+        if state.editing:
+            if key == "cancel":
+                state.regex_enabled = original_mode
+                state.editing = False
+            elif key == "enter":
+                state.pattern = state.text
+                state.editing = False
+            elif key == "left":
+                state.cursor = max(0, state.cursor - 1)
+            elif key == "right":
+                state.cursor = min(len(state.text), state.cursor + 1)
+            elif key == "backspace" and state.cursor:
+                state.text = state.text[:state.cursor - 1] + state.text[state.cursor:]
+                state.cursor -= 1
+            elif len(key) == 1 and key.isprintable():
+                state.text = state.text[:state.cursor] + key + state.text[state.cursor:]
+                state.cursor += 1
+                if key in _REGEX_METACHARACTERS:
+                    state.regex_enabled = True
+            continue
+        state.message = ""
+        if key == "cancel":
+            return "Canceled."
+        if field == "Pattern":
+            if key == "backspace":
+                state.pattern = state.pattern[:-1]
+            elif len(key) == 1 and key.isprintable():
+                state.pattern += key
+                if key in _REGEX_METACHARACTERS:
+                    state.regex_enabled = True
+            elif key == "enter":
+                state.text, state.cursor = state.pattern, len(state.pattern)
+                original_mode = state.regex_enabled
+                state.editing = True
+            elif key == "down":
+                state.field = 3
+            elif key == "right":
+                state.field = 1
+        elif field in ("Foreground", "Background"):
+            if key in ("up", "down"):
+                _editor_change_style(state, field, -1 if key == "up" else 1, adding=True)
+            elif key in ("left", "right"):
+                state.field = max(0, min(3, state.field + (-1 if key == "left" else 1)))
+            elif key == "b" and field == "Foreground":
+                _editor_change_style(state, "Bold", 1)
+            elif key == "i" and field == "Background":
+                _editor_change_style(state, "Inverse", 1)
+            elif key == "enter":
+                result = _save_editor_rule(state, rules, rules_path, profile)
+                if result is not None:
+                    return result
+        elif field == "Mode":
+            if key in ("enter", "left", "right"):
+                state.regex_enabled = not state.regex_enabled
+            elif key == "up":
+                state.field = 1
 
 
 def _rule_editor(
@@ -1106,6 +1285,8 @@ def _rule_editor(
     profile: str | None,
     rule: ColorRule | None = None,
 ) -> str:
+    if rule is None:
+        return _add_rule_editor(console, live, rules, rules_path, keyboard_fd, profile)
     state = _RuleEditorState(
         rule.pattern if rule else "", rule.color if rule else "yellow",
         rule.profile_name if rule else profile, rule,
@@ -1185,27 +1366,9 @@ def _rule_editor(
                 else:
                     state.regex_enabled = not state.regex_enabled
             elif field == "Save":
-                try:
-                    _load_settings(rules_path.parent, profile)
-                    if rule is None:
-                        _write_ad_hoc_rule(
-                            rules_path, state.pattern, state.color, state.scope,
-                            regex_enabled=state.regex_enabled,
-                        )
-                    else:
-                        _edit_rule(
-                            rule, rules_path, state.pattern, state.color,
-                            profile=profile, regex_enabled=state.regex_enabled,
-                        )
-                except (OSError, TypeError, ValueError) as error:
-                    state.message = f"Could not save rule: {error}"
-                    continue
-                try:
-                    _, loaded_rules, _ = _load_settings(rules_path.parent, profile)
-                except (OSError, TypeError, ValueError) as error:
-                    return f"Rule saved but could not reload: {error}"
-                rules[:] = loaded_rules
-                return "Edited rule." if rule else "Added rule."
+                result = _save_editor_rule(state, rules, rules_path, profile)
+                if result is not None:
+                    return result
 
 
 def _select_profile(
@@ -1418,39 +1581,39 @@ def _manage_profiles(
 def _render_rule_manager(
     console: Console, rules: list[ColorRule], selected: int, message: str
 ) -> Group:
-    pattern_width = max(20, max((cell_len(repr(rule.pattern)) + 1 for rule in rules), default=0))
-    name_width = max(20, max((cell_len(rule.name or "-") + 1 for rule in rules), default=0))
+    headings = ("", "Status", "Source", "Profile", "Type", "Name", "Pattern", "Style")
+    rows = [
+        (
+            ">" if index == selected else " ",
+            "disabled" if rule.disabled else "enabled",
+            "built-in" if rule.source == "built-in" else Path(rule.source).name,
+            "-" if rule.source == "built-in" else rule.profile_name or ("shared" if rule.shared else "-"),
+            "regex" if rule.regex_enabled else "literal",
+            rule.name or "-",
+            repr(rule.pattern),
+            rule.color,
+        )
+        for index, rule in enumerate(rules)
+    ]
+    widths = [
+        max(cell_len(heading), *(cell_len(row[index]) for row in rows)) + 1
+        if rows else cell_len(heading) + 1
+        for index, heading in enumerate(headings)
+    ]
 
     def make_table(start: int, end: int) -> Table:
         table = Table(title="Rules manager", box=None, padding=(0, 0, 0, 1))
-        for heading, minimum, maximum in (
-            ("", 1, 1), ("Status", 8, 8), ("Source", 10, 12), ("Profile", 7, 16),
-            ("Type", 7, 7), ("Name", 4, name_width), ("Pattern", 8, pattern_width),
-            ("Style", 6, 20),
-        ):
-            flexible = heading in {"Name", "Pattern"}
+        for heading, width in zip(headings, widths):
+            flexible = heading in {"Source", "Profile", "Name", "Pattern", "Style"}
             table.add_column(
-                heading.ljust(20) if flexible else heading,
-                min_width=minimum, max_width=maximum,
-                no_wrap=not flexible, overflow="fold" if flexible else "ellipsis",
+                heading.ljust(width),
+                max_width=width, no_wrap=not flexible, overflow="fold",
             )
         for index in range(start, end):
             rule = rules[index]
-            source = "built-in" if rule.source == "built-in" else Path(rule.source).name
             style = rule.group_colors[0] if rule.group_colors else rule.color
-            name, pattern = rule.name or "-", repr(rule.pattern)
-            name += " " * max(1, 20 - cell_len(name))
-            pattern += " " * max(1, 20 - cell_len(pattern))
-            cells = [
-                Text(">" if index == selected else " "),
-                Text("disabled" if rule.disabled else "enabled"),
-                Text(source),
-                Text(rule.profile_name or ("shared" if rule.shared else "-")),
-                Text("regex" if rule.regex_enabled else "literal"),
-                Text(name, no_wrap=False, overflow="fold"),
-                Text(pattern, style=style, no_wrap=False, overflow="fold"),
-                Text(rule.color, style=style),
-            ]
+            cells = [Text(value, style=style if cell in (6, 7) else None)
+                     for cell, value in enumerate(rows[index])]
             if index == selected:
                 for cell in cells:
                     cell.stylize("reverse")

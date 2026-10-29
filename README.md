@@ -134,9 +134,9 @@ rules manager, **?** to show the interactive
 command list, or **q** to quit. The
 **f** toggle applies only to the current run; it does not change
 `ctail.toml`. The help panel closes when any key is pressed. Rules created
-with **c** are saved in the selected profile's `.rules` file. A named active profile
-is the default destination, but the editor can instead save a shared rule.
-Without an active named profile, new rules are shared.
+with **c** are saved in the selected profile's `.rules` file. Without an active
+named profile, new rules apply only to the default profile. Use the rules
+manager to move a rule to the shared scope.
 
 Press **p** to open the profile selector. The table shows each profile and its
 configured path patterns; a dash means there are no associated paths.
@@ -145,8 +145,8 @@ profile, or **Escape** to cancel.
 The **n** action shown below the profile list prompts for a name, saves a new
 empty `NAME.rules` profile, and activates it as the saved profile. Selecting
 **(default)** removes `active_profile` from the configuration. Adding a rule
-with **c** while a named profile is active defaults to that profile's file;
-with **(default)** active, new interactive rules are shared in `default.rules`.
+with **c** while a named profile is active writes to that profile's file;
+with **(default)** active, new interactive rules are default-only in `default.rules`.
 If a path mapping selected the profile at startup, the terminal shows the
 selected profile, and changing or creating a profile with **p** affects only
 the current run. The profile definition and its rules are still saved. For
@@ -192,13 +192,14 @@ are shown in a terminal; redirected output and `--no-color` produce plain text.
 While following a file, press **r** to open the rules manager. It lists the
 current profile's effective rules in priority order, including shared ad-hoc
 rules, disabled rules and built-ins. Columns show status, source, profile,
-type, name, pattern and style. The table uses the available terminal width;
-Name and Pattern grow to fit their contents and wrap when space is limited.
+type, name, pattern and style. Built-ins show `-` for their profile, even when
+their settings have a profile-specific override. Columns grow to fit their
+contents and wrap when the available terminal width is limited.
 The manager adjusts the visible rows to keep the selected rule in view.
 Use **Up/Down** to select a rule:
 
 - **a** opens the rule editor to add a rule.
-- **e** opens the same editor for the selected rule.
+- **e** opens the editor for the selected rule.
 - **d** toggles the selected rule's enabled/disabled state.
 - **x** removes a custom rule after confirmation. Built-ins cannot be removed.
 - **m** moves a custom rule to a named profile or to
@@ -222,14 +223,35 @@ Custom rules are changed in their `.rules` files; existing comments, other
 rules, and unrelated settings are preserved. Failed saves are reported without
 changing the running rule list.
 
-### Rule editor
+### Adding a rule
 
-The editor is also opened by **c** while following a log. Use **Left/Right**
+Press **c** while following a log or **a** in the rules manager. Type the
+pattern, then use **Left/Right** to select Foreground or Background.
+Both colors start at `none`; **Up/Down** browse colors, with basic colors first.
+Press **b** on Foreground to toggle bold, or **i** on Background to toggle
+inverse. Style is shown for reference. Press **Enter** on either color to save,
+or **Escape** to discard changes. Validation errors leave the dialog open.
+
+New rules start in literal mode. Typing any of `. ^ $ * + ? { } [ ] \ | ( )`
+automatically switches to regex mode. Press **Down** from Pattern to select
+Mode, then **Enter** or **Left/Right** to toggle it manually; **Up** returns to
+Foreground. Typing another regex metacharacter switches it back to regex.
+With Pattern selected, press **Enter** to edit at a specific position;
+**Left/Right** move the cursor, **Backspace** deletes, **Enter** accepts the
+text, and **Escape** discards that text edit.
+
+Rules are inserted at the beginning of the current profile's scope. They are
+not shared automatically, including in the default profile. Use **m** in the
+rules manager to move a custom rule to another profile or the shared scope.
+
+### Editing a rule
+
+Select **e** in the rules manager. Use **Left/Right**
 to select Pattern, Foreground or Background. For colors, **Up/Down** browse
 the named colors, including `default` and `none`; nearby choices are shown
 above and below the selection. Press **Down** from Pattern or **Right** from
 Background to select Bold; **Up** from Bold returns to Background.
-Use **Up/Down** to select Bold, Inverse, Style, Scope, Mode, Save or Cancel.
+Use **Up/Down** to select Bold, Inverse, Scope, Save, Cancel, Mode or Style.
 Use **Left/Right** or **Enter** to toggle Bold, Inverse or Mode. A preview shows the
 current style.
 Turning either attribute off removes it from the style; explicitly entered
@@ -248,11 +270,7 @@ remain in the editor until saved or canceled. Outside text-edit mode,
 **Escape** cancels the entire editor. Select Save and press **Enter** to
 validate and save; errors leave the editor open.
 
-New rules default to literal matching; select **Mode** and toggle it to
-**regex** to use a regular expression. Rules are inserted at the beginning of
-their selected scope. On Scope, use **Left/Right** or **Enter** to choose between the active
-named profile and **All profiles (shared)**. With no named profile, only the
-shared destination is available. Editing retains the selected rule's existing
+Editing retains the selected rule's existing
 file, scope, priority, name, enabled state and mode unless you change Mode.
 Built-in patterns and their regex mode cannot be changed. Use the manager's
 **m** action to move a custom rule instead.
@@ -336,7 +354,7 @@ the rules manager, **?** to open the help panel, and **q** to quit. In the
 manager, check arrow-key navigation, **a** to add, **e** to edit, **d** to
 toggle, **x** to remove, **m** to move an ad-hoc rule, confirmation and
 **Escape** cancellation. In the editor, check color browsing, the preview,
-scope selection, saving and cancellation;
+automatic regex mode, keyboard shortcuts, saving and cancellation;
 restart the app or run `ctail --show-rules` to verify the saved state.
 Interactive keys are available when following a file in a terminal;
 they are not used when input is piped. Remove the sample file afterward with
@@ -407,13 +425,14 @@ pattern = '\b(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\b'
 color = "bright_cyan"
 ```
 
-Rules added interactively default to literal matching but can use regex mode.
+Rules added interactively start in literal mode and switch to regex mode when
+a regex metacharacter is typed; Mode can also be toggled manually.
 Entries in `default.rules` apply to the default profile unless marked
 `shared = true`, in which case they apply to every profile and take priority
 over profile-specific rules. Entries in `NAME.rules` apply only to the
-matching profile. Interactive rules default to the active named
-profile, but can be saved as shared rules; without a named profile they are
-shared. The active profile is persistent, so after selecting
+matching profile. Interactive rules are added to the active profile, or to the
+default profile when no named profile is active; use the rules manager to make
+them shared. The active profile is persistent, so after selecting
 it once you can start ctail without `--profile`. To change it for a run and
 persist that change, supply a different profile explicitly:
 
