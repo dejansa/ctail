@@ -34,25 +34,25 @@ pipx install 'git+ssh://git@gitlab.com/aviatnetworks/qa/tools/ctail.git'
 
 Both commands install the `ctail` command into the tool's executable path
 (typically `~/.local/bin`). On the first run, `ctail` creates
-`~/.config/ctail/` and copies in an example `ctail.toml`, `default.rules`,
-and `http-access.rules` if the configuration does not already exist. Existing configuration is never replaced, including when
+`~/.config/ctail/` and copies in an example `ctail.toml`, `default.rules.toml`,
+and `http-access.rules.toml` if the configuration does not already exist. Existing configuration is never replaced, including when
 upgrading the tool. The starter files are maintained in the repository's
 top-level `config/` folder. Add `~/.local/bin` to `PATH` if it is not already
 there.
 
 Settings live in `~/.config/ctail/ctail.toml`; coloring rules live in
-TOML-formatted `.rules` files in the same directory. Rules are applied only
+TOML-formatted `.rules.toml` files in the same directory. Rules are applied only
 to the matching part of a line; regex rules are checked in file order, and
 earlier rules take precedence when matches overlap. Unmatched lines are hidden
 by default, as in the original Bash script. Set `show_unmatched = true` to
 display them.
 
 Use `--profile NAME` (or `-p NAME`) to select a named set of rules for a
-particular log format. Define each profile in a file named `NAME.rules`.
+particular log format. Define each profile in a file named `NAME.rules.toml`.
 Selecting a profile saves `active_profile = "NAME"` in that file; subsequent
 runs use the saved profile unless another `--profile` is supplied. Without a
-saved or explicit profile, `default.rules` is used. Selecting a profile
-replaces the default-only rules. Built-in rules and rules in `default.rules`
+saved or explicit profile, `default.rules.toml` is used. Selecting a profile
+replaces the default-only rules. Built-in rules and rules in `default.rules.toml`
 marked `shared = true` remain active.
 
 To select a profile automatically for a file, add ordered path mappings to
@@ -72,7 +72,7 @@ paths = ["/var/log/nginx/*.log"]
 
 ```
 
-Each mapping references an existing profile file such as `asaklogs.rules`. A path ending in
+Each mapping references an existing profile file such as `asaklogs.rules.toml`. A path ending in
 `/` matches files directly in that directory, not in subdirectories. A path
 without wildcards matches a single file; `*`, `?`, and character classes match
 within one path component, while `**` matches across directory levels. For
@@ -91,7 +91,7 @@ patterns in the configuration; shell-expanded arguments that produce multiple
 files do not select a profile automatically. Use `--profile` when automatic
 detection is not possible. Listing commands do not match paths.
 
-For example, `http-access.rules` contains:
+For example, `http-access.rules.toml` contains:
 
 ```toml
 [[rules]]
@@ -134,7 +134,7 @@ rules manager, **?** to show the interactive
 command list, or **q** to quit. The
 **f** toggle applies only to the current run; it does not change
 `ctail.toml`. The help panel closes when any key is pressed. Rules created
-with **c** are saved in the selected profile's `.rules` file. Without an active
+with **c** are saved in the selected profile's `.rules.toml` file. Without an active
 named profile, new rules apply only to the default profile. Use the rules
 manager to copy a custom rule to another named profile.
 
@@ -143,10 +143,10 @@ configured path patterns; a dash means there are no associated paths.
 **(default)** is the first option; use **Up/Down** and **Enter** to select a
 profile, or **Escape** to cancel.
 The **n** action shown below the profile list prompts for a name, saves a new
-empty `NAME.rules` profile, and activates it as the saved profile. Selecting
+empty `NAME.rules.toml` profile, and activates it as the saved profile. Selecting
 **(default)** removes `active_profile` from the configuration. Adding a rule
 with **c** while a named profile is active writes to that profile's file;
-with **(default)** active, new interactive rules are default-only in `default.rules`.
+with **(default)** active, new interactive rules are default-only in `default.rules.toml`.
 If a path mapping selected the profile at startup, the terminal shows the
 selected profile, and changing or creating a profile with **p** affects only
 the current run. The profile definition and its rules are still saved. For
@@ -175,12 +175,12 @@ of foreground/background styles and custom color syntax. It does not require
 valid configuration files.
 
 `--list-profiles` prints the named profiles configured in
-by `*.rules` files. It accepts the short alias `-lsp`.
+by `*.rules.toml` files. It accepts the short alias `-lsp`.
 
 `--show-rules` without a profile lists the default rules in priority order:
-shared rules, default rules from `default.rules`, and
+shared rules, default rules from `default.rules.toml`, and
 built-in rules. With `--profile NAME`, it lists only rules declared for that
-profile's `.rules` file; shared and built-in rules are omitted.
+profile's `.rules.toml` file; shared and built-in rules are omitted.
 Each entry shows its source, enabled/disabled status, regex/literal mode,
 optional name, pattern, and style rendered in its configured colors.
 
@@ -196,6 +196,11 @@ are not shown. To customize a built-in rule, add an override in the
 configuration file as described below. Columns show status, source, profile,
 type, name, pattern and style. Columns grow to fit their contents and wrap when
 the available terminal width is limited.
+Patterns are displayed without added quotes or doubled backslashes. Pattern
+and style cells preview the rule's colors, including on the selected row;
+selection highlighting applies only to the other columns.
+Cell contents are padded with spaces so selection and preview backgrounds fill
+their column width, leaving the gaps between columns unchanged.
 The manager adjusts the visible rows to keep the selected rule in view.
 Use **Up/Down** to select a rule:
 
@@ -219,7 +224,7 @@ while the manager is open and resumes afterward, retaining the previous
 pause/resume state.
 
 Changes apply immediately to subsequent log lines and persist across restarts.
-Custom rules are changed in their `.rules` files; existing comments, other
+Custom rules are changed in their `.rules.toml` files; existing comments, other
 rules, and unrelated settings are preserved. Failed saves are reported without
 changing the running rule list.
 
@@ -246,44 +251,30 @@ rules manager to copy a custom rule to another named profile.
 
 ### Editing a rule
 
-Select **e** in the rules manager. Use **Left/Right**
-to select Pattern, Foreground or Background. For colors, **Up/Down** browse
-the named colors, including `default` and `none`; nearby choices are shown
-above and below the selection. Press **Down** from Pattern or **Right** from
-Background to select Bold; **Up** from Bold returns to Background.
-Use **Up/Down** to select Bold, Inverse, Scope, Save, Cancel, Mode or Style.
-Use **Left/Right** or **Enter** to toggle Bold, Inverse or Mode. A preview shows the
-current style.
-Turning either attribute off removes it from the style; explicitly entered
-negative attributes are otherwise preserved.
-The controls and keyboard instructions are displayed on separate lines.
-Very short terminals use a compact layout.
-The Pattern column is 44 terminal cells wide when space permits; on narrower
-terminals the columns shrink, and the pattern view keeps the cursor visible.
+Select **e** in the rules manager. Editing uses the same dialog and controls as
+adding, prefilled with the selected rule's pattern, colors and mode. Use
+**Left/Right** to select Pattern, Foreground or Background; **Up/Down** browse
+colors, with basic colors first. Press **b** on Foreground to toggle bold, or
+**i** on Background to toggle inverse. Style is shown for reference. Press
+**Enter** on either color to validate and save, or **Escape** to discard
+changes. Validation errors leave the dialog open.
 
-With Pattern selected, type directly and use **Backspace** to remove the last
-character. **Left/Right** still move between fields. For editing at a specific
-position, press **Enter** on Pattern or Style to enter text-edit mode. In that mode,
-**Left/Right** move the cursor, **Backspace** deletes, **Enter** accepts the
-text, and **Escape** discards that text edit. Directly typed pattern changes
-remain in the editor until saved or canceled. Outside text-edit mode,
-**Escape** cancels the entire editor. Select Save and press **Enter** to
-validate and save; errors leave the editor open.
+The selected rule's file, scope, priority, name and enabled state are retained.
+Mode is also retained unless changed. With Pattern selected, type directly and
+use **Backspace** to remove the last character. Regex metacharacters
+automatically switch to regex mode. Press **Down** from Pattern to select Mode;
+**Enter** or **Left/Right** toggle it, and **Up** returns to Foreground.
+For editing the pattern at a specific position, press **Enter** on Pattern to
+enter text-edit mode. **Left/Right** move the cursor, **Backspace** deletes,
+**Enter** accepts the text, and **Escape** discards that text edit. Outside
+text-edit mode, **Escape** cancels the entire editor.
 
-Editing retains the selected rule's existing
-file, scope, priority, name, enabled state and mode unless you change Mode.
-
-The Style field accepts the full Rich style syntax, including custom colors and
-comma-separated capture-group styles. Styles with attributes beyond the
-foreground, background, bold and inverse controls, or multiple capture-group
-styles, remain unchanged unless edited in Style. The visual color and
-attribute controls are unavailable for those complex styles; edit Style
-directly to change them. Built-in rules are not available in the manager. To
-change one, add an override in the `.rules` file for the current profile or
-default rules.
+Complex styles remain unchanged by the visual color controls. Built-in rules
+are not available in the manager; to change one, add an override in the
+`.rules.toml` file for the current profile or default rules.
 
 To disable a custom rule manually, add `disabled = true` to its `[[rules]]`
-entry in its `.rules` file:
+entry in its `.rules.toml` file:
 
 ```toml
 [[rules]]
@@ -296,7 +287,7 @@ disabled = true
 can still match the same text.
 
 Built-ins have no file entry initially. Toggling one creates an explicit
-override in the active `.rules` file, identified by `builtin = true` and its exact built-in
+override in the active `.rules.toml` file, identified by `builtin = true` and its exact built-in
 regex pattern. For example, disable the built-in debug coloring with:
 
 ```toml
@@ -307,7 +298,7 @@ disabled = true
 ```
 
 Set `disabled = false` to re-enable it. Built-in overrides are only allowed in
-`.rules` files and do not create duplicate rules. A separate custom rule matching
+`.rules.toml` files and do not create duplicate rules. A separate custom rule matching
 the same text remains independent. Manual file edits take effect after
 restarting `ctail`.
 
@@ -368,12 +359,14 @@ and cannot be repeated to add more rules.
 The runtime configuration directory and starter files are created
 automatically on the first run if they are missing. The examples are maintained
 in the repository's top-level `config/` folder. Existing installations are not
-automatically migrated. Back up `ctail.toml`, then move its top-level `[[rules]]`
-entries to `default.rules` and each `[profiles.NAME]` profile's rules to
-`NAME.rules`, changing each `[[profiles.NAME.rules]]` header to `[[rules]]`.
+automatically migrated. Rename any `default.rules` and `NAME.rules` files to
+`default.rules.toml` and `NAME.rules.toml`. Back up `ctail.toml`, then move its
+top-level `[[rules]]` entries to `default.rules.toml` and each `[profiles.NAME]`
+profile's rules to `NAME.rules.toml`, changing each
+`[[profiles.NAME.rules]]` header to `[[rules]]`.
 Preserve the order and `shared` flags, including built-in overrides. Leave
 settings and `[[profile_paths]]` in `ctail.toml`. Empty profiles need an empty
-`NAME.rules` file. Legacy embedded rules remain readable, but a profile or
+`NAME.rules.toml` file. Legacy embedded rules remain readable, but a profile or
 default rules cannot be defined in both formats. The older `rules.toml` file
 is not read; migrate its rules separately.
 
@@ -388,7 +381,7 @@ profile = "nginx"
 paths = ["/var/log/nginx/*.log"]
 ```
 
-Example `default.rules`:
+Example `default.rules.toml`:
 
 ```toml
 [[rules]]
@@ -414,7 +407,7 @@ regex = false
 shared = true
 ```
 
-Example `nginx.rules`:
+Example `nginx.rules.toml`:
 
 ```toml
 [[rules]]
@@ -425,9 +418,9 @@ color = "bright_cyan"
 
 Rules added interactively start in literal mode and switch to regex mode when
 a regex metacharacter is typed; Mode can also be toggled manually.
-Entries in `default.rules` apply to the default profile unless marked
+Entries in `default.rules.toml` apply to the default profile unless marked
 `shared = true`, in which case they apply to every profile and take priority
-over profile-specific rules. Entries in `NAME.rules` apply only to the
+over profile-specific rules. Entries in `NAME.rules.toml` apply only to the
 matching profile. Interactive rules are added to the active profile, or to the
 default profile when no named profile is active; use the rules manager to make
 them shared. The active profile is persistent, so after selecting
@@ -438,7 +431,7 @@ persist that change, supply a different profile explicitly:
 ctail --profile nginx -f /var/log/nginx/access.log
 ```
 
-The profile name is the filename before `.rules`. Profiles
+The profile name is the filename before `.rules.toml`. Profiles
 replace the default-only rules; shared rules, built-in
 rules, and global settings such as `show_unmatched` still apply.
 `--show-rules --profile nginx` displays the profile-specific rules.

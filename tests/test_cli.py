@@ -308,6 +308,28 @@ class ListingTests(unittest.TestCase):
             pattern for pattern, _ in DEFAULT_RULES
         ])
 
+    def test_write_profile_uses_toml_rule_file_names(self):
+        config_path = self.config_dir / "ctail.toml"
+        config_path.write_text("")
+        (self.config_dir / "default.rules.toml").write_text("")
+
+        _write_profile(config_path, "new")
+
+        self.assertTrue((self.config_dir / "new.rules.toml").is_file())
+        self.assertEqual(
+            [rule.pattern for rule in _load_settings(self.config_dir, "new")[1]],
+            [pattern for pattern, _ in DEFAULT_RULES],
+        )
+
+    def test_legacy_rule_extension_is_not_loaded(self):
+        (self.config_dir / "ctail.toml").write_text("show_unmatched = true\n")
+        (self.config_dir / "legacy.rules").write_text(
+            '[[rules]]\npattern = "legacy"\ncolor = "red"\n'
+        )
+
+        with self.assertRaisesRegex(ValueError, "unknown profile"):
+            _load_settings(self.config_dir, "legacy")
+
     def test_write_profile_rejects_duplicate_name_without_changing_file(self):
         config_path = self.config_dir / "ctail.toml"
         original = "[profiles.existing]\n"
@@ -405,7 +427,7 @@ class ListingTests(unittest.TestCase):
 
         self.assertEqual(selected, "new-profile")
         config_text = (self.config_dir / "ctail.toml").read_text()
-        self.assertTrue((self.config_dir / "new-profile.rules").is_file())
+        self.assertTrue((self.config_dir / "new-profile.rules.toml").is_file())
         self.assertIn('active_profile = "new-profile"', config_text)
         self.assertEqual([rule.pattern for rule in rules], [
             pattern for pattern, _ in DEFAULT_RULES
@@ -443,9 +465,9 @@ class ListingTests(unittest.TestCase):
         self.assertTrue(main_config_path.is_file())
         self.assertFalse(rules_config_path.exists())
         self.assertIn("show_unmatched = true", main_config_path.read_text())
-        self.assertTrue((self.config_dir / "http-access.rules").is_file())
+        self.assertTrue((self.config_dir / "http-access.rules.toml").is_file())
         self.assertIn("Syslog timestamp", output)
-        self.assertIn("Request ID field", (self.config_dir / "default.rules").read_text())
+        self.assertIn("Request ID field", (self.config_dir / "default.rules.toml").read_text())
 
     def test_first_run_preserves_existing_configuration(self):
         original = 'show_unmatched = false\n\n[[rules]]\npattern = "custom"\ncolor = "red"\n'

@@ -76,7 +76,7 @@ def _initialize_config(config_dir: Path) -> None:
     example_dir = _example_config_directory()
     if (config_dir / "ctail.toml").exists():
         return
-    for name in ("default.rules", "http-access.rules", "ctail.toml"):
+    for name in ("default.rules.toml", "http-access.rules.toml", "ctail.toml"):
         config_path = config_dir / name
         if config_path.exists():
             continue
@@ -210,10 +210,10 @@ def _parse_rule_profiles(
             allow_builtins=allow_builtins,
             profile_name=name,
         )
-    for path in sorted(source.parent.glob("*.rules")):
-        if path.name == "default.rules":
+    for path in sorted(source.parent.glob("*.rules.toml")):
+        if path.name == "default.rules.toml":
             continue
-        name = path.stem
+        name = _rule_profile_name(path)
         if name in parsed:
             raise ValueError(f"{path}: profile {name!r} is also defined in {source}")
         file_data = _read_toml(path)
@@ -360,7 +360,7 @@ def _load_settings(
         )
         _parse_profile_paths(config, config_path, configured_profiles)
 
-    default_path = config_dir / "default.rules"
+    default_path = config_dir / "default.rules.toml"
     if default_path.exists():
         if configured_rules:
             raise ValueError(f"{config_path}: default rules are also defined in {default_path}")
@@ -514,12 +514,13 @@ def _read_rule_document(
     else:
         document = tomlkit.document()
     data = document.unwrap()
+    is_rule_file = _is_rule_file(path)
     _parse_rules(
         data.get("rules", []), path,
-        allow_builtins=path.name == "ctail.toml" or path.suffix == ".rules",
-        profile_name=profile_name if path.suffix == ".rules" else None,
+        allow_builtins=path.name == "ctail.toml" or is_rule_file,
+        profile_name=profile_name if is_rule_file else None,
     )
-    if path.suffix == ".rules":
+    if is_rule_file:
         if set(data) - {"rules"}:
             raise ValueError(f"{path}: rules files may only contain 'rules'")
         return document, _rule_entries(document, path, None)
@@ -558,12 +559,17 @@ def _rule_entries(
 
 
 def _save_rule_document(path: Path, document: TOMLDocument) -> None:
+    is_rule_file = _is_rule_file(path)
     _parse_rules(
         document.unwrap().get("rules", []), path,
-        allow_builtins=path.name == "ctail.toml" or path.suffix == ".rules",
-        profile_name=path.stem if path.suffix == ".rules" and path.stem != "default" else None,
+        allow_builtins=path.name == "ctail.toml" or is_rule_file,
+        profile_name=(
+            _rule_profile_name(path)
+            if is_rule_file and path.name != "default.rules.toml"
+            else None
+        ),
     )
-    if path.suffix == ".rules" and set(document.unwrap()) - {"rules"}:
+    if is_rule_file and set(document.unwrap()) - {"rules"}:
         raise ValueError(f"{path}: rules files may only contain 'rules'")
     profiles = (
         _parse_rule_profiles(document.unwrap(), path, allow_builtins=True)
@@ -631,7 +637,7 @@ def _write_profile(path: Path, profile_name: str) -> None:
         raise ValueError(f"{path}: profile {profile_name!r} already exists")
 
     if _uses_rule_files(path):
-        profile_path = path.with_name(f"{profile_name}.rules")
+        profile_path = path.with_name(f"{profile_name}.rules.toml")
         with profile_path.open("x", encoding="utf-8"):
             pass
         return
@@ -643,7 +649,7 @@ def _write_profile(path: Path, profile_name: str) -> None:
 
 
 def _uses_rule_files(config_path: Path) -> bool:
-    if any(config_path.parent.glob("*.rules")):
+    if any(config_path.parent.glob("*.rules.toml")):
         return True
     data = _read_toml(config_path) if config_path.exists() else {}
     return "rules" not in data and "profiles" not in data
@@ -657,7 +663,15 @@ def _scope_path(config_path: Path, profile_name: str | None) -> Path:
         return config_path
     if not _uses_rule_files(config_path):
         return config_path
-    return config_path.with_name(f"{profile_name or 'default'}.rules")
+    return config_path.with_name(f"{profile_name or 'default'}.rules.toml")
+
+
+def _is_rule_file(path: Path) -> bool:
+    return path.name.endswith(".rules.toml")
+
+
+def _rule_profile_name(path: Path) -> str:
+    return path.name.removesuffix(".rules.toml")
 
 
 def _write_profile_path(path: Path, profile_name: str, pattern: str) -> None:
@@ -894,17 +908,13 @@ def _read_rule_key(keyboard_fd: int) -> str:
 
 _BASIC_EDITOR_COLORS = ("none", "black", "white", "red", "green", "blue", "yellow", "magenta", "cyan")
 _EDITOR_COLORS = ("none", *sorted({"default", *ANSI_COLOR_NAMES}))
-_ADD_EDITOR_COLORS = (*_BASIC_EDITOR_COLORS, *(
+_RULE_EDITOR_COLORS = (*_BASIC_EDITOR_COLORS, *(
     color for color in _EDITOR_COLORS if color not in _BASIC_EDITOR_COLORS
 ))
 _EDITOR_COLUMN_WIDTH = max(cell_len(name) for name in _EDITOR_COLORS) + 1
 _EDITOR_PATTERN_WIDTH = 55
-_ADD_EDITOR_FIELDS = ("Pattern", "Foreground", "Background", "Mode")
+_RULE_EDITOR_FIELDS = ("Pattern", "Foreground", "Background", "Mode")
 _REGEX_METACHARACTERS = frozenset(r".^$*+?{}[]\|()")
-_EDITOR_FIELDS = (
-    "Pattern", "Foreground", "Background", "Bold", "Inverse", "Scope", "Save",
-    "Cancel", "Mode", "Style",
-)
 
 
 @dataclass
@@ -932,26 +942,24 @@ def _editor_style(color: str) -> Style | None:
     return style if style == simple else None
 
 
-def _editor_color_choices(color: str | None, *, adding: bool = False) -> list[str]:
-    choices = list(_ADD_EDITOR_COLORS if adding else _EDITOR_COLORS)
+def _editor_color_choices(color: str | None) -> list[str]:
+    choices = list(_RULE_EDITOR_COLORS)
     if color is not None and color not in choices:
         choices.insert(1, color)
     return choices
 
 
-def _editor_change_style(
-    state: _RuleEditorState, field: str, step: int, *, adding: bool = False
-) -> None:
+def _editor_change_style(state: _RuleEditorState, field: str, step: int) -> None:
     style = _editor_style(state.color)
     if style is None:
-        state.message = "Complex style: edit Style directly before using color controls."
+        state.message = "Complex style: color controls are unavailable."
         return
     foreground = style.color.name if style.color else None
     background = style.bgcolor.name if style.bgcolor else None
     bold, reverse = style.bold, style.reverse
     if field in ("Foreground", "Background"):
         current = foreground if field == "Foreground" else background
-        choices = _editor_color_choices(current, adding=adding)
+        choices = _editor_color_choices(current)
         index = choices.index(current or "none")
         name = choices[max(0, min(len(choices) - 1, index + step))]
         if field == "Foreground":
@@ -976,10 +984,8 @@ def _editor_text_window(text: str, cursor: int, width: int) -> str:
     return ("<" if start else "") + value[start:end] + (">" if end < len(value) else "")
 
 
-def _render_editor_table(
-    console: Console, state: _RuleEditorState, *, adding: bool, rows: int = 5
-) -> Table:
-    field = (_ADD_EDITOR_FIELDS if adding else _EDITOR_FIELDS)[state.field]
+def _render_editor_table(console: Console, state: _RuleEditorState, *, rows: int = 5) -> Table:
+    field = _RULE_EDITOR_FIELDS[state.field]
     style = _editor_style(state.color)
     foreground = style.color.name if style and style.color else "none"
     background = style.bgcolor.name if style and style.bgcolor else "none"
@@ -997,8 +1003,8 @@ def _render_editor_table(
         table.add_column(heading, width=width, overflow="ellipsis", no_wrap=True)
     height = rows
     center = height // 2
-    fg_choices = _editor_color_choices(None if foreground == "none" else foreground, adding=adding)
-    bg_choices = _editor_color_choices(None if background == "none" else background, adding=adding)
+    fg_choices = _editor_color_choices(None if foreground == "none" else foreground)
+    bg_choices = _editor_color_choices(None if background == "none" else background)
     fg_index, bg_index = fg_choices.index(foreground), bg_choices.index(background)
     for row in range(height):
         offset = row - center
@@ -1016,9 +1022,9 @@ def _render_editor_table(
             (bg_choices, bg_index, field == "Background", True),
         ):
             start = max(0, min(index - center, len(choices) - height))
-            position = start + row if adding else index + offset
+            position = start + row
             name = choices[position] if 0 <= position < len(choices) else ""
-            selected = position == index if adding else offset == 0
+            selected = position == index
             cell = Text(">" if active and selected else " ", style="bold")
             sample_style = None
             if name and name != "none":
@@ -1039,19 +1045,16 @@ def _render_editor_table(
 
 
 def _fit_editor_view(
-    console: Console, state: _RuleEditorState, *, adding: bool,
+    console: Console, state: _RuleEditorState,
     controls: list[Text], mode: Text, style: Text, preview: Text,
     instructions: tuple[str, ...], message: str,
 ) -> Group:
     rows = 5
-    title = True
     show_table = True
     help_lines = list(instructions)
 
     def render() -> Group:
-        table = _render_editor_table(console, state, adding=adding, rows=rows)
-        if not title:
-            table.title = None
+        table = _render_editor_table(console, state, rows=rows)
         return Group(
             *([table] if show_table else []), *controls, mode, style, preview, Text(""),
             *(Text(line, style="dim") for line in help_lines),
@@ -1065,9 +1068,6 @@ def _fit_editor_view(
     while rows > 1 and not fits(view):
         rows -= 1
         view = render()
-    if not adding and console.size.height <= 8 and not fits(view):
-        title = False
-        view = render()
     while help_lines and not fits(view):
         help_lines.pop()
         view = render()
@@ -1077,78 +1077,8 @@ def _fit_editor_view(
     return view
 
 
-def _render_rule_editor(console: Console, state: _RuleEditorState, profile: str | None) -> Group:
-    field = _EDITOR_FIELDS[state.field]
-    style = _editor_style(state.color)
-    compact = console.size.height < 20
-    scope = state.scope or "All profiles (shared)"
-    if state.rule is not None:
-        scope = state.rule.profile_name or ("shared" if state.rule.shared else "default")
-    values = {
-        "Bold": ("on" if style.bold else "off") if style is not None else "-",
-        "Inverse": ("on" if style.reverse else "off") if style is not None else "-",
-        "Style": (
-            _editor_text_window(state.text, state.cursor, max(10, console.width // 3))
-            if state.editing and field == "Style" else state.color
-        ),
-        "Scope": scope,
-        "Mode": "regex" if state.regex_enabled else "literal",
-        "Save": "",
-        "Cancel": "",
-    }
-    def control(name: str) -> Text:
-        result = Text(">" if field == name else " ", style="bold")
-        label = f"{name}: {values[name]}" if values[name] else name
-        result.append(label, style="reverse" if field == name else None)
-        return result
-
-    controls = [control(name) for name in ("Bold", "Inverse", "Scope", "Save", "Cancel")]
-    try:
-        preview_style = _split_colors(state.color)[0]
-        Style.parse(preview_style)
-        preview = Text(state.pattern or "Preview", style=preview_style, no_wrap=True)
-    except (ColorParseError, StyleSyntaxError):
-        preview = Text("Invalid style", style="bold red")
-    instructions = (
-        ("Editing text", "Left/Right: move", "Backspace: delete", "Enter: accept", "Esc: cancel")
-        if state.editing else (
-            "Type pattern; Enter: edit/select; Esc: cancel",
-            "Columns: Left/Right; colors: Up/Down",
-            "Options: Up/Down; values: Left/Right",
-            "From Pattern press Down, or from Background press Right, to select Bold",
-            "From Bold press Up to return to Background",
-        )
-    )
-    notice = "Complex style: use Style to edit it." if style is None else ""
-    if state.rule and state.rule.source == "built-in":
-        notice = "Built-in pattern and regex mode are read-only. " + notice
-    message = state.message or notice
-    if compact:
-        compact_controls = Text()
-        for item in controls:
-            if compact_controls:
-                compact_controls.append("  ")
-            compact_controls.append_text(item)
-        compact_instructions = (
-            ("Editing: Left/Right move; Backspace deletes; Enter accepts; Esc cancels", "")
-            if state.editing else (
-                "L/R: columns or values; U/D: colors or options; Enter: select; Esc: cancel",
-                "Pattern + Down or Background + Right: select Bold; Bold + Up: Background",
-            )
-        )
-        controls = [compact_controls]
-        instructions = compact_instructions
-    else:
-        controls = [Text(""), *controls]
-    return _fit_editor_view(
-        console, state, adding=False, controls=controls,
-        mode=control("Mode"), style=control("Style"), preview=Text("Preview: ") + preview,
-        instructions=instructions, message=message,
-    )
-
-
-def _render_add_rule_editor(console: Console, state: _RuleEditorState) -> Group:
-    field = _ADD_EDITOR_FIELDS[state.field]
+def _render_rule_editor(console: Console, state: _RuleEditorState) -> Group:
+    field = _RULE_EDITOR_FIELDS[state.field]
     compact = console.size.height < 12
     mode = Text(">" if field == "Mode" else " ", style="bold")
     mode.append(f"Mode: {'regex' if state.regex_enabled else 'literal'}",
@@ -1178,9 +1108,13 @@ def _render_add_rule_editor(console: Console, state: _RuleEditorState) -> Group:
     if compact and state.message:
         instructions = ()
     return _fit_editor_view(
-        console, state, adding=True, controls=[], mode=mode, style=style,
+        console, state, controls=[], mode=mode, style=style,
         preview=Text("Preview: ") + preview, instructions=instructions, message=state.message,
     )
+
+
+def _render_add_rule_editor(console: Console, state: _RuleEditorState) -> Group:
+    return _render_rule_editor(console, state)
 
 
 def _save_editor_rule(
@@ -1210,16 +1144,22 @@ def _save_editor_rule(
     return "Edited rule." if rule else "Added rule."
 
 
-def _add_rule_editor(
+def _rule_editor(
     console: Console, live: Live, rules: list[ColorRule], rules_path: Path,
-    keyboard_fd: int, profile: str | None,
+    keyboard_fd: int, profile: str | None, rule: ColorRule | None = None,
 ) -> str:
-    state = _RuleEditorState("", "none", profile, None)
-    original_mode = False
+    state = _RuleEditorState(
+        rule.pattern if rule else "",
+        rule.color if rule else "none",
+        rule.profile_name if rule else profile,
+        rule,
+        regex_enabled=rule.regex_enabled if rule else False,
+    )
+    original_mode = state.regex_enabled
     while True:
-        live.update(_render_add_rule_editor(console, state), refresh=True)
+        live.update(_render_rule_editor(console, state), refresh=True)
         key = _read_rule_key(keyboard_fd)
-        field = _ADD_EDITOR_FIELDS[state.field]
+        field = _RULE_EDITOR_FIELDS[state.field]
         if state.editing:
             if key == "cancel":
                 state.regex_enabled = original_mode
@@ -1245,22 +1185,31 @@ def _add_rule_editor(
             return "Canceled."
         if field == "Pattern":
             if key == "backspace":
-                state.pattern = state.pattern[:-1]
+                if rule is not None and rule.source == "built-in":
+                    state.message = "Built-in patterns cannot be changed."
+                else:
+                    state.pattern = state.pattern[:-1]
             elif len(key) == 1 and key.isprintable():
-                state.pattern += key
-                if key in _REGEX_METACHARACTERS:
-                    state.regex_enabled = True
+                if rule is not None and rule.source == "built-in":
+                    state.message = "Built-in patterns cannot be changed."
+                else:
+                    state.pattern += key
+                    if key in _REGEX_METACHARACTERS:
+                        state.regex_enabled = True
             elif key == "enter":
-                state.text, state.cursor = state.pattern, len(state.pattern)
-                original_mode = state.regex_enabled
-                state.editing = True
+                if rule is not None and rule.source == "built-in":
+                    state.message = "Built-in patterns cannot be changed."
+                else:
+                    state.text, state.cursor = state.pattern, len(state.pattern)
+                    original_mode = state.regex_enabled
+                    state.editing = True
             elif key == "down":
                 state.field = 3
             elif key == "right":
                 state.field = 1
         elif field in ("Foreground", "Background"):
             if key in ("up", "down"):
-                _editor_change_style(state, field, -1 if key == "up" else 1, adding=True)
+                _editor_change_style(state, field, -1 if key == "up" else 1)
             elif key in ("left", "right"):
                 state.field = max(0, min(3, state.field + (-1 if key == "left" else 1)))
             elif key == "b" and field == "Foreground":
@@ -1273,104 +1222,12 @@ def _add_rule_editor(
                     return result
         elif field == "Mode":
             if key in ("enter", "left", "right"):
-                state.regex_enabled = not state.regex_enabled
+                if rule is not None and rule.source == "built-in":
+                    state.message = "Built-in rules must use regex."
+                else:
+                    state.regex_enabled = not state.regex_enabled
             elif key == "up":
                 state.field = 1
-
-
-def _rule_editor(
-    console: Console,
-    live: Live,
-    rules: list[ColorRule],
-    rules_path: Path,
-    keyboard_fd: int,
-    profile: str | None,
-    rule: ColorRule | None = None,
-) -> str:
-    if rule is None:
-        return _add_rule_editor(console, live, rules, rules_path, keyboard_fd, profile)
-    state = _RuleEditorState(
-        rule.pattern if rule else "", rule.color if rule else "yellow",
-        rule.profile_name if rule else profile, rule,
-        regex_enabled=rule.regex_enabled if rule else False,
-    )
-    while True:
-        live.update(_render_rule_editor(console, state, profile), refresh=True)
-        key = _read_rule_key(keyboard_fd)
-        field = _EDITOR_FIELDS[state.field]
-        if state.editing:
-            if key == "cancel":
-                state.editing = False
-            elif key == "enter":
-                if field == "Pattern":
-                    state.pattern = state.text
-                else:
-                    state.color = state.text
-                state.editing = False
-            elif key == "left":
-                state.cursor = max(0, state.cursor - 1)
-            elif key == "right":
-                state.cursor = min(len(state.text), state.cursor + 1)
-            elif key == "backspace" and state.cursor:
-                state.text = state.text[:state.cursor - 1] + state.text[state.cursor:]
-                state.cursor -= 1
-            elif len(key) == 1 and key.isprintable():
-                state.text = state.text[:state.cursor] + key + state.text[state.cursor:]
-                state.cursor += 1
-            continue
-        state.message = ""
-        if key == "cancel":
-            return "Canceled."
-        if field == "Pattern" and (key == "backspace" or (len(key) == 1 and key.isprintable())):
-            if rule is not None and rule.source == "built-in":
-                state.message = "Built-in patterns cannot be changed."
-            elif key == "backspace":
-                state.pattern = state.pattern[:-1]
-            else:
-                state.pattern += key
-            continue
-        if key in ("left", "right"):
-            if state.field <= 2:
-                state.field = max(0, min(3, state.field + (-1 if key == "left" else 1)))
-            elif field in ("Bold", "Inverse"):
-                _editor_change_style(state, field, -1 if key == "left" else 1)
-            elif field == "Scope" and rule is None and profile is not None:
-                state.scope = None if state.scope is not None else profile
-            elif field == "Mode":
-                if rule is not None and rule.source == "built-in":
-                    state.message = "Built-in rules must use regex."
-                else:
-                    state.regex_enabled = not state.regex_enabled
-        elif key in ("up", "down"):
-            if field in ("Foreground", "Background"):
-                _editor_change_style(state, field, -1 if key == "up" else 1)
-            elif field == "Pattern" and key == "down":
-                state.field = 3
-            elif state.field >= 3:
-                state.field = max(2, min(len(_EDITOR_FIELDS) - 1, state.field + (-1 if key == "up" else 1)))
-        elif key == "enter":
-            if field == "Cancel":
-                return "Canceled."
-            if field in ("Pattern", "Style"):
-                if field == "Pattern" and rule is not None and rule.source == "built-in":
-                    state.message = "Built-in patterns cannot be changed."
-                    continue
-                state.text = state.pattern if field == "Pattern" else state.color
-                state.cursor = len(state.text)
-                state.editing = True
-            elif field in ("Bold", "Inverse"):
-                _editor_change_style(state, field, 1)
-            elif field == "Scope" and rule is None and profile is not None:
-                state.scope = None if state.scope is not None else profile
-            elif field == "Mode":
-                if rule is not None and rule.source == "built-in":
-                    state.message = "Built-in rules must use regex."
-                else:
-                    state.regex_enabled = not state.regex_enabled
-            elif field == "Save":
-                result = _save_editor_rule(state, rules, rules_path, profile)
-                if result is not None:
-                    return result
 
 
 def _select_profile(
@@ -1593,13 +1450,14 @@ def _render_rule_manager(
             rule.profile_name or ("shared" if rule.shared else "-"),
             "regex" if rule.regex_enabled else "literal",
             rule.name or "-",
-            repr(rule.pattern),
+            rule.pattern,
             rule.color,
         )
         for index, rule in enumerate(rules)
     ]
     widths = [
-        max(cell_len(heading), *(cell_len(row[index]) for row in rows)) + 1
+        max(cell_len(heading), *(cell_len(line) for row in rows
+                                for line in row[index].split("\n"))) + 1
         if rows else cell_len(heading) + 1
         for index, heading in enumerate(headings)
     ]
@@ -1615,11 +1473,14 @@ def _render_rule_manager(
         for index in range(start, end):
             rule = rules[index]
             style = rule.group_colors[0] if rule.group_colors else rule.color
-            cells = [Text(value, style=style if cell in (6, 7) else None)
-                        for cell, value in enumerate(rows[index])]
-            if index == selected:
-                for cell in cells:
-                    cell.stylize("reverse")
+            cells = [
+                Text(
+                    value,
+                    style=style if cell in (6, 7) else "reverse" if index == selected else "",
+                    justify="left",
+                )
+                for cell, value in enumerate(rows[index])
+            ]
             table.add_row(*cells)
         return table
 
