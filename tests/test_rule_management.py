@@ -32,9 +32,10 @@ from ctail.cli import (
     _edit_rule,
     _load_settings,
     _manage_rules,
-    _move_ad_hoc_rule,
+    _copy_ad_hoc_rule,
     _parse_rules,
     _read_rule_key,
+    _rename_rule,
     _render_add_rule_editor,
     _render_line,
     _render_rule_manager,
@@ -454,6 +455,109 @@ class RuleManagementTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "changed on disk"):
             _change_rule(rule, self.rules_path, delete=True)
         self.assertEqual(self.rules_path.read_bytes(), before)
+
+    def test_rename_changes_only_selected_name_and_preserves_comments(self):
+        self.write_custom_rules()
+        before = tomllib.loads(self.rules_path.read_text())
+        rules = self.load_rules()
+        self.run_manager(rules, ["down", "r", *"New name", "enter", "cancel"])
+        expected = before
+        expected["rules"][1]["name"] = "New name"
+        self.assertEqual(tomllib.loads(self.rules_path.read_text()), expected)
+        self.assertIn("# main comment", self.rules_path.read_text())
+        self.assertIn("# disabled comment", self.rules_path.read_text())
+        self.assertEqual(rules, self.load_rules())
+        self.assertEqual(rules[1].name, "New name")
+        self.assertIn("Renamed rule.", self.output.getvalue())
+        self.assertIn("r: rename", self.output.getvalue())
+
+    def test_rename_edits_prefilled_name_and_cancels(self):
+        self.rules_path.write_text(
+            '[[rules]]\nname="Old"\npattern="x"\ncolor="red"\n'
+        )
+        rules = self.load_rules()
+        self.run_manager(
+            rules, ["R", "left", "backspace", "a", "right", "!", "enter", "cancel"]
+        )
+        self.assertEqual(rules[0].name, "Oad!")
+        before = self.rules_path.read_bytes()
+        self.run_manager(rules, ["r", *"discard", "cancel", "cancel"])
+        self.assertEqual(self.rules_path.read_bytes(), before)
+        self.assertEqual(rules[0].name, "Oad!")
+
+    def test_rename_empty_name_reports_error_and_allows_retry(self):
+        self.write_custom_rules()
+        rules = self.load_rules()
+        self.run_manager(rules, ["r", "enter", " ", "enter", "N", "enter", "cancel"])
+        self.assertIn("Rule name must not be empty", self.output.getvalue())
+        self.assertEqual(rules[0].name, " N")
+
+    def test_rename_scopes_and_inline_arrays_preserve_other_fields(self):
+        for split in (False, True):
+            for profile in (None, "web"):
+                with self.subTest(split=split, profile=profile):
+                    with tempfile.TemporaryDirectory() as directory:
+                        config = Path(directory) / "ctail.toml"
+                        entry = (
+                            '{name="Old", pattern="same", color="red", regex=false, '
+                            'disabled=true}'
+                        )
+                        if split:
+                            config.write_text("")
+                            path = config.with_name(f"{profile or 'default'}.rules")
+                            path.write_text(f"rules=[{entry}, {entry}]\n")
+                        else:
+                            path = config
+                            section = "[profiles.web]\n" if profile else ""
+                            path.write_text(section + f"rules=[{entry}, {entry}]\n")
+                        rules = _load_settings(config.parent, profile)[1]
+                        before = tomllib.loads(path.read_text())
+                        _rename_rule(rules[1], config, "Renamed", profile=profile)
+                        entries = (
+                            before["profiles"]["web"]["rules"]
+                            if profile and not split else before["rules"]
+                        )
+                        entries[1]["name"] = "Renamed"
+                        self.assertEqual(tomllib.loads(path.read_text()), before)
+                        self.assertEqual(
+                            _load_settings(config.parent, profile)[1][1].name, "Renamed"
+                        )
+
+    def test_manager_hides_builtin_rules_and_cannot_rename_them(self):
+        self.config_path.write_text("[profiles.web]\n")
+        rules = _load_settings(self.config_dir, "web")[1]
+        self.run_manager(rules, ["r", *"Error", "enter", "cancel"], profile="web")
+        self.assertNotIn("built-in", self.output.getvalue())
+        self.assertIsNone(rules[0].name)
+        self.assertNotIn("rules", tomllib.loads(self.config_path.read_text())["profiles"]["web"])
+
+    def test_rename_stale_rule_and_failed_save_preserve_data(self):
+        self.write_custom_rules()
+        rules = self.load_rules()
+        before = list(rules)
+        data = self.rules_path.read_bytes()
+        with patch("ctail.cli.os.replace", side_effect=OSError("write denied")):
+            self.run_manager(rules, ["r", *"New", "enter", "cancel", "cancel"])
+        self.assertEqual(rules, before)
+        self.assertEqual(self.rules_path.read_bytes(), data)
+        self.assertIn("Could not rename rule: write denied", self.output.getvalue())
+        self.rules_path.write_text(self.rules_path.read_text().replace('"literal"', '"edited"'))
+        data = self.rules_path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "changed on disk"):
+            _rename_rule(rules[0], self.rules_path, "New")
+        self.assertEqual(self.rules_path.read_bytes(), data)
+
+    def test_rename_reload_failure_reports_saved_state(self):
+        self.write_custom_rules()
+        rules = self.load_rules()
+        before = list(rules)
+        with patch("ctail.cli._load_settings", side_effect=[
+            (False, rules, self.config_path), OSError("read denied")
+        ]):
+            self.run_manager(rules, ["r", *"New", "enter", "cancel"])
+        self.assertEqual(rules, before)
+        self.assertEqual(tomllib.loads(self.config_path.read_text())["rules"][0]["name"], "New")
+        self.assertIn("Rule saved but could not reload: read denied", self.output.getvalue())
 
     def test_failed_save_preserves_disk_and_running_rules(self):
         self.write_custom_rules()
@@ -1050,7 +1154,7 @@ class RuleManagementTests(unittest.TestCase):
         self.assertEqual(self.load_rules()[0].pattern, "x")
         self.assertIn("# keep", self.rules_path.read_text())
 
-    def test_move_ad_hoc_rule_between_scopes_preserves_fields_and_duplicates(self):
+    def test_copy_ad_hoc_rule_to_profile_preserves_fields_and_source(self):
         self.rules_path.write_text(
             '# retained\n[[rules]]\nname = "first"\npattern = "same"\n'
             'color = "red"\nregex = false\nshared = true\n\n'
@@ -1060,9 +1164,9 @@ class RuleManagementTests(unittest.TestCase):
         )
         self.rules_path.chmod(0o640)
         rule = _load_settings(self.config_dir, "one")[1][1]
-        self.assertTrue(_move_ad_hoc_rule(rule, self.rules_path, "two", profile="one"))
+        self.assertTrue(_copy_ad_hoc_rule(rule, self.rules_path, "two", profile="one"))
         data = tomllib.loads(self.rules_path.read_text())
-        self.assertEqual(data["rules"][0]["name"], "first")
+        self.assertEqual(data["rules"][0]["name"], "second")
         moved = data["profiles"]["two"]["rules"][0]
         self.assertEqual(moved, {
             "name": "second", "pattern": "same", "color": "blue",
@@ -1070,114 +1174,95 @@ class RuleManagementTests(unittest.TestCase):
         })
         self.assertIn("# retained", self.rules_path.read_text())
         self.assertEqual(self.rules_path.stat().st_mode & 0o777, 0o640)
-        self.assertNotIn("second", [
+        self.assertIn("second", [
             item.name for item in _load_settings(self.config_dir, "one")[1]
         ])
+        self.assertFalse(_copy_ad_hoc_rule(rule, self.rules_path, "two", profile="one"))
         scoped = next(
             item for item in _load_settings(self.config_dir, "two")[1]
             if item.name == "second"
         )
-        self.assertFalse(_move_ad_hoc_rule(scoped, self.rules_path, "two", profile="two"))
-        self.assertTrue(_move_ad_hoc_rule(scoped, self.rules_path, None, profile="two"))
-        for profile in (None, "one", "two"):
-            self.assertIn("second", [
-                item.name for item in _load_settings(self.config_dir, profile)[1]
-            ])
+        self.assertFalse(_copy_ad_hoc_rule(scoped, self.rules_path, "two", profile="two"))
 
-    def test_move_supports_inline_and_array_of_tables(self):
+    def test_copy_supports_inline_and_array_of_tables(self):
         self.rules_path.write_text(
             'rules = [{pattern="x", color="red", shared=true}] # shared\n'
             '[profiles.one]\n[[profiles.one.rules]]\npattern="y"\ncolor="blue"\n'
         )
         rules = _load_settings(self.config_dir, "one")[1]
-        _move_ad_hoc_rule(rules[0], self.rules_path, "one", profile="one")
-        moved = next(r for r in _load_settings(self.config_dir, "one")[1] if r.pattern == "y")
-        _move_ad_hoc_rule(moved, self.rules_path, None, profile="one")
+        self.assertTrue(_copy_ad_hoc_rule(rules[0], self.rules_path, "one", profile="one"))
         data = tomllib.loads(self.rules_path.read_text())
-        self.assertEqual(data["rules"][0]["pattern"], "y")
+        self.assertEqual(data["rules"][0]["pattern"], "x")
         self.assertEqual(data["profiles"]["one"]["rules"][0]["pattern"], "x")
+        self.assertEqual(data["profiles"]["one"]["rules"][1]["pattern"], "y")
         self.assertIn("# shared", self.rules_path.read_text())
 
-    def test_move_rejects_stale_invalid_and_failed_writes(self):
+    def test_copy_rejects_stale_invalid_and_failed_writes(self):
         self.rules_path.write_text('[[rules]]\npattern="x"\ncolor="red"\n[profiles.one]\n')
         rule = self.load_rules()[0]
         with self.assertRaisesRegex(ValueError, "no longer exists"):
-            _move_ad_hoc_rule(rule, self.rules_path, "missing")
+            _copy_ad_hoc_rule(rule, self.rules_path, "missing")
         before = self.rules_path.read_bytes()
         with patch("ctail.cli.os.replace", side_effect=OSError("write denied")):
             with self.assertRaisesRegex(OSError, "write denied"):
-                _move_ad_hoc_rule(rule, self.rules_path, "one")
+                _copy_ad_hoc_rule(rule, self.rules_path, "one")
         self.assertEqual(self.rules_path.read_bytes(), before)
         self.rules_path.write_text(self.rules_path.read_text().replace('"x"', '"edited"'))
         before = self.rules_path.read_bytes()
         with self.assertRaisesRegex(ValueError, "changed on disk"):
-            _move_ad_hoc_rule(rule, self.rules_path, "one")
+            _copy_ad_hoc_rule(rule, self.rules_path, "one")
         self.assertEqual(self.rules_path.read_bytes(), before)
 
-    def test_manager_move_cancel_and_failed_save_preserve_state(self):
-        self.config_path.write_text("[profiles.one]\n")
+    def test_manager_copy_cancel_and_failed_save_preserve_state(self):
+        self.config_path.write_text("[profiles.one]\n[profiles.two]\n")
         self.rules_path.write_text('[[rules]]\npattern="x"\ncolor="red"\n')
         rules = self.load_rules()
         before_rules = list(rules)
         before_file = self.rules_path.read_bytes()
-        self.run_manager(rules, ["m", "down", "enter", "n", "cancel"])
+        self.run_manager(rules, ["c", "enter", "n", "cancel"])
         self.assertEqual(rules, before_rules)
         self.assertEqual(self.rules_path.read_bytes(), before_file)
         with patch("ctail.cli.os.replace", side_effect=OSError("write denied")):
-            self.run_manager(rules, ["m", "down", "enter", "y", "cancel"])
+            self.run_manager(rules, ["c", "enter", "y", "cancel"])
         self.assertIn("write denied", self.output.getvalue())
         self.assertEqual(rules, before_rules)
         self.assertEqual(self.rules_path.read_bytes(), before_file)
 
-    def test_manager_move_defaults_to_active_profile_and_refreshes(self):
+    def test_manager_copy_defaults_to_active_profile_and_keeps_source(self):
         self.rules_path.write_text(
             '[[rules]]\npattern="x"\ncolor="red"\nshared=true\n'
             '[profiles.one]\n[profiles.two]\n'
         )
         rules = _load_settings(self.config_dir, "one")[1]
-        self.run_manager(rules, ["m", "enter", "y", "cancel"], profile="one")
-        self.assertEqual(rules[0].profile_name, "one")
-        self.assertIn("Moved rule.", self.output.getvalue())
-        self.run_manager(rules, ["m", "down", "enter", "y", "cancel"], profile="one")
-        self.assertNotIn("x", [rule.pattern for rule in rules])
+        self.run_manager(rules, ["c", "enter", "y", "cancel"], profile="one")
+        self.assertIn("Copied rule.", self.output.getvalue())
+        self.assertIn("x", [rule.pattern for rule in rules])
         self.assertIn("x", [rule.pattern for rule in _load_settings(self.config_dir, "two")[1]])
+        self.assertTrue(any(rule.profile_name == "one" for rule in rules if rule.pattern == "x"))
 
-    def test_manager_same_scope_move_stays_in_selector_and_preserves_rule(self):
-        self.config_path.write_text("[profiles.one]\n")
-        for profile, document, scope in (
-            (None, '[[rules]]\npattern="x"\ncolor="red"\nshared=true\n', "All profiles (shared)"),
-            ("one", '[[profiles.one.rules]]\npattern="x"\ncolor="red"\n', "one"),
-        ):
-            with self.subTest(profile=profile):
-                self.output.seek(0)
-                self.output.truncate()
-                self.rules_path.write_text(document)
-                rules = _load_settings(self.config_dir, profile)[1]
-                before_rules = list(rules)
-                before_file = self.rules_path.read_bytes()
-                self.run_manager(rules, ["m", "enter", "cancel", "cancel"], profile=profile)
-                output = self.output.getvalue()
-                self.assertIn(f"{scope} (current scope)", output)
-                self.assertIn("Already in this scope; choose another destination.", output)
-                self.assertEqual(rules, before_rules)
-                self.assertEqual(self.rules_path.read_bytes(), before_file)
-
-    def test_manager_can_choose_another_scope_after_same_scope(self):
-        self.config_path.write_text("[profiles.one]\n")
-        self.rules_path.write_text('[[profiles.one.rules]]\npattern="x"\ncolor="red"\n')
+    def test_manager_copy_omits_current_profile_from_destinations(self):
+        self.config_path.write_text("[profiles.one]\n[profiles.two]\n")
+        self.rules_path.write_text(
+            '[[profiles.one.rules]]\npattern="x"\ncolor="red"\n'
+        )
         rules = _load_settings(self.config_dir, "one")[1]
-        self.run_manager(rules, ["m", "enter", "up", "enter", "y", "cancel"], profile="one")
-        self.assertIsNone(rules[0].profile_name)
-        self.assertIn("Moved rule.", self.output.getvalue())
+        before_file = self.rules_path.read_bytes()
+        self.run_manager(rules, ["c", "cancel", "cancel"], profile="one")
+        self.assertIn("two", self.output.getvalue())
+        self.assertNotIn("one", self.output.getvalue())
+        self.assertEqual(self.rules_path.read_bytes(), before_file)
 
-    def test_manager_builtin_override_uses_active_profile(self):
+    def test_manager_hides_builtin_overrides_and_does_not_toggle_them(self):
         self.config_path.write_text("[profiles.one]\n")
+        rules = _load_settings(self.config_dir, "one")[1]
+        _change_rule(rules[0], self.rules_path, delete=False, profile="one")
         rules = _load_settings(self.config_dir, "one")[1]
         self.run_manager(rules, ["d", "cancel"], profile="one")
         self.assertTrue(rules[0].disabled)
         self.assertFalse(self.load_rules()[0].disabled)
         self.assertTrue(tomllib.loads(self.config_path.read_text())[
             "profiles"]["one"]["rules"][0]["disabled"])
+        self.assertNotIn("built-in", self.output.getvalue())
 
     def test_manager_table_aligns_columns_and_fits_terminal(self):
         self.rules_path.write_text(
@@ -1284,7 +1369,7 @@ class RuleManagementTests(unittest.TestCase):
             self.assertEqual(actual.replace(" ", ""), value.replace(" ", ""))
         self.assertTrue(all(cell_len(line) <= 70 for line in lines))
 
-    def test_manager_hides_builtin_override_profile_but_preserves_scope(self):
+    def test_manager_does_not_display_builtin_overrides(self):
         self.config_path.write_text("[profiles.asaklogs]\n")
         rules = _load_settings(self.config_dir, "asaklogs")[1]
         _change_rule(rules[0], self.rules_path, delete=False, profile="asaklogs")
@@ -1293,10 +1378,8 @@ class RuleManagementTests(unittest.TestCase):
         output = io.StringIO()
         console = Console(file=output, width=160, height=20, color_system=None)
         console.print(_render_rule_manager(console, rules, 0, "").renderables[0])
-        lines = output.getvalue().splitlines()
-        header = next(line for line in lines if "Profile" in line)
-        row = next(line for line in lines if "built-in" in line)
-        self.assertEqual(row[header.index("Profile"):header.index("Type")].strip(), "-")
+        self.assertNotIn("built-in", output.getvalue())
+        self.assertNotIn(DEFAULT_RULES[0][0], output.getvalue())
         _change_rule(rules[0], self.rules_path, delete=False, profile="asaklogs")
         self.assertFalse(_load_settings(self.config_dir, "asaklogs")[1][0].disabled)
         entries = tomllib.loads(self.config_path.read_text())["profiles"]["asaklogs"]["rules"]
@@ -1314,11 +1397,8 @@ class RuleManagementTests(unittest.TestCase):
         output = io.StringIO()
         console = Console(file=output, width=160, height=20, color_system=None)
         console.print(_render_rule_manager(console, rules, 0, "").renderables[0])
-        lines = output.getvalue().splitlines()
-        header = next(line for line in lines if "Profile" in line)
-        row = next(line for line in lines if "built-in" in line)
-        self.assertEqual(row[header.index("Profile"):header.index("Type")].strip(), "-")
-        self.assertIn("bold bright_red on bright_white", row)
+        self.assertNotIn("built-in", output.getvalue())
+        self.assertNotIn(DEFAULT_RULES[0][0], output.getvalue())
         _edit_rule(rules[0], self.rules_path, rules[0].pattern, "green", profile="asaklogs")
         self.assertEqual(_load_settings(self.config_dir, "asaklogs")[1][0].color, "green")
         self.assertEqual(self.load_rules()[0].color, DEFAULT_RULES[0][1])
@@ -1455,8 +1535,8 @@ class RuleManagementTests(unittest.TestCase):
         )
         self.rules_path.write_text(contents)
         rules = self.load_rules()
-        self.run_manager(rules, ["up", "down", "down", "down", "up", "d", "cancel"])
-        self.assertTrue(rules[2].disabled)
+        self.run_manager(rules, ["up", "down", "down", "d", "cancel"])
+        self.assertTrue(next(rule for rule in rules if rule.pattern == "user").disabled)
         self.assertIn("Disabled rule", self.output.getvalue())
 
     def test_listing_includes_rule_name_and_pattern(self):
@@ -1470,11 +1550,12 @@ class RuleManagementTests(unittest.TestCase):
         self.assertIn("Request identifier", output)
         self.assertIn("request_id=", output)
 
-    def test_manager_rejects_builtin_removal_and_move(self):
+    def test_manager_ignores_builtin_actions_when_no_custom_rules_exist(self):
         rules = self.load_rules()
-        self.run_manager(rules, ["x", "m", "cancel"])
-        self.assertIn("cannot be deleted", self.output.getvalue())
-        self.assertIn("Only custom rules", self.output.getvalue())
+        self.run_manager(rules, ["x", "m", "c", "cancel"])
+        self.assertNotIn("built-in", self.output.getvalue())
+        self.assertNotIn("cannot be deleted", self.output.getvalue())
+        self.assertFalse(self.config_path.exists())
         self.assertEqual(rules, self.load_rules())
 
     def test_escape_cancels_without_writing_or_changing_live_rules(self):
@@ -1482,7 +1563,7 @@ class RuleManagementTests(unittest.TestCase):
         rules = self.load_rules()
         before = list(rules)
         contents = [path.read_bytes() for path in (self.rules_path, self.config_path)]
-        self.run_manager(rules, ["x", "cancel", "m", "cancel", "cancel"])
+        self.run_manager(rules, ["x", "cancel", "c", "cancel", "cancel"])
         self.assertEqual(rules, before)
         self.assertEqual(contents, [
             path.read_bytes() for path in (self.rules_path, self.config_path)
@@ -1589,32 +1670,15 @@ class RuleManagementTests(unittest.TestCase):
             os.close(master_fd)
             os.close(slave_fd)
 
-    def test_pty_builtin_disable_enable_applies_to_live_stream(self):
+    def test_pty_builtin_rules_stay_active_but_are_hidden_from_manager(self):
         self.config_path.write_text("show_unmatched = false\n")
         with self.running_app() as (master_fd, log_path):
-            error_rule_index = next(
-                index for index, rule in enumerate(self.load_rules())
-                if rule.pattern == DEFAULT_RULES[0][0]
-            )
             os.write(master_fd, b"r")
-            self.read_until(master_fd, b"Rules manager")
-            os.write(master_fd, b"\x1b[B" * error_rule_index + b"d")
-            self.read_until(master_fd, b"Disabled rule")
+            output = self.read_until(master_fd, b"Rules manager")
+            self.assertNotIn(DEFAULT_RULES[0][0].encode(), output)
+            os.write(master_fd, b"d")
             os.write(master_fd, b"\x1b")
-            error_rule = next(
-                rule for rule in self.load_rules()
-                if rule.pattern == DEFAULT_RULES[0][0]
-            )
-            self.assertTrue(error_rule.disabled)
-            with log_path.open("a") as log:
-                log.write("[ERROR] hidden-error\n[INFO] visible-info\n")
-            output = self.read_until(master_fd, b"visible-info")
-            self.assertNotIn(b"hidden-error", output)
-            os.write(master_fd, b"r")
-            self.read_until(master_fd, b"Rules manager")
-            os.write(master_fd, b"\x1b[B" * error_rule_index + b"d")
-            self.read_until(master_fd, b"Enabled rule")
-            os.write(master_fd, b"\x1b")
+            self.assertFalse((self.config_dir / "default.rules").exists())
             with log_path.open("a") as log:
                 log.write("[ERROR] visible-error\n")
             self.read_until(master_fd, b"visible-error")
@@ -1643,33 +1707,49 @@ class RuleManagementTests(unittest.TestCase):
             os.write(master_fd, b"\x1b")
             self.read_until(master_fd, b"\x1b[?1049l")
 
-    def test_pty_move_between_active_and_shared_scopes(self):
+    def test_pty_rename_rule_persists_and_preserves_live_matching(self):
+        self.write_custom_rules()
+        with self.running_app() as (master_fd, log_path):
+            os.write(master_fd, b"r")
+            self.read_until(master_fd, b"Rules manager")
+            os.write(master_fd, b"\x1b[Br")
+            self.read_until(master_fd, b"Rename rule")
+            os.write(master_fd, b"Other rule\r")
+            self.read_until(master_fd, b"Renamed rule.")
+            self.assertEqual(self.load_rules()[1].name, "Other rule")
+            os.write(master_fd, b"\x1b")
+            self.read_until(master_fd, b"\x1b[?1049l")
+            with log_path.open("a") as log:
+                log.write("other still-matches-after-rename\n")
+            self.read_until(master_fd, b"still-matches-after-rename")
+
+    def test_pty_copy_rule_to_other_profiles(self):
         self.rules_path.write_text(
             'active_profile = "one"\n[[rules]]\npattern="x"\ncolor="red"\n'
-            'regex=false\nshared=true\n[profiles.one]\n'
+            'regex=false\nshared=true\n[profiles.one]\n[profiles.two]\n'
         )
         with self.running_app() as (master_fd, _):
             os.write(master_fd, b"r")
             self.read_until(master_fd, b"Rules manager")
-            os.write(master_fd, b"m")
-            self.read_until(master_fd, b"Move ad-hoc rule to")
+            os.write(master_fd, b"c")
+            self.read_until(master_fd, b"Copy rule to")
             os.write(master_fd, b"\r")
-            self.read_until(master_fd, b"Move rule to one?")
+            self.read_until(master_fd, b"Copy rule to one?")
             os.write(master_fd, b"y")
-            self.read_until(master_fd, b"Moved rule.")
+            self.read_until(master_fd, b"Copied rule.")
             data = tomllib.loads(self.rules_path.read_text())
             self.assertEqual(data["profiles"]["one"]["rules"][0]["pattern"], "x")
-            os.write(master_fd, b"m")
-            self.read_until(master_fd, b"one (current scope)")
-            before = self.rules_path.read_bytes()
+            self.assertEqual(data["rules"][0]["pattern"], "x")
+            os.write(master_fd, b"c")
+            self.read_until(master_fd, b"Copy rule to")
             os.write(master_fd, b"\r")
-            self.read_until(master_fd, b"Already in this scope; choose another destination.")
-            self.assertEqual(self.rules_path.read_bytes(), before)
-            os.write(master_fd, b"\x1b[A\r")
-            self.read_until(master_fd, b"Move rule to all profiles")
+            self.read_until(master_fd, b"Copy rule to two?")
             os.write(master_fd, b"y")
-            self.read_until(master_fd, b"Moved rule.")
-            self.assertEqual(tomllib.loads(self.rules_path.read_text())["rules"][0]["pattern"], "x")
+            self.read_until(master_fd, b"Copied rule.")
+            data = tomllib.loads(self.rules_path.read_text())
+            self.assertEqual(data["profiles"]["one"]["rules"][0]["pattern"], "x")
+            self.assertEqual(data["profiles"]["two"]["rules"][0]["pattern"], "x")
+            self.assertEqual(data["rules"][0]["pattern"], "x")
             os.write(master_fd, b"\x1b")
             self.read_until(master_fd, b"\x1b[?1049l")
 

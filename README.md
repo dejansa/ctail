@@ -136,7 +136,7 @@ command list, or **q** to quit. The
 `ctail.toml`. The help panel closes when any key is pressed. Rules created
 with **c** are saved in the selected profile's `.rules` file. Without an active
 named profile, new rules apply only to the default profile. Use the rules
-manager to move a rule to the shared scope.
+manager to copy a custom rule to another named profile.
 
 Press **p** to open the profile selector. The table shows each profile and its
 configured path patterns; a dash means there are no associated paths.
@@ -190,32 +190,32 @@ are shown in a terminal; redirected output and `--no-color` produce plain text.
 ## Managing rules
 
 While following a file, press **r** to open the rules manager. It lists the
-current profile's effective rules in priority order, including shared ad-hoc
-rules, disabled rules and built-ins. Columns show status, source, profile,
-type, name, pattern and style. Built-ins show `-` for their profile, even when
-their settings have a profile-specific override. Columns grow to fit their
-contents and wrap when the available terminal width is limited.
+current profile's user-defined rules in priority order, including shared
+ad-hoc and disabled rules. Built-in coloring remains active but built-in rules
+are not shown. To customize a built-in rule, add an override in the
+configuration file as described below. Columns show status, source, profile,
+type, name, pattern and style. Columns grow to fit their contents and wrap when
+the available terminal width is limited.
 The manager adjusts the visible rows to keep the selected rule in view.
 Use **Up/Down** to select a rule:
 
 - **a** opens the rule editor to add a rule.
 - **e** opens the editor for the selected rule.
+- **r** renames the selected rule. Edit its prefilled name with **Left/Right**
+  and **Backspace**, then press **Enter** to save a non-empty name or **Escape**
+  to cancel. Unnamed rules start with an empty field. Only the name changes.
 - **d** toggles the selected rule's enabled/disabled state.
-- **x** removes a custom rule after confirmation. Built-ins cannot be removed.
-- **m** moves a custom rule to a named profile or to
-  **All profiles (shared)**. The current named profile is selected initially;
-  without one, the shared destination is selected. Confirm the scope change.
-  The rule's existing scope is marked in the destination list. Selecting it
-  changes nothing and prompts you to choose another destination or cancel.
+- **x** removes a rule after confirmation.
+- **c** copies a custom rule to another named profile. The current profile is
+  selected initially when it is a valid destination; the rule's source profile
+  is not offered. Confirm the copy.
+- An identical rule already in the destination is not copied again.
 - **Escape** cancels a pending action or closes the manager.
 
-Moving a rule changes its scope and, when needed, its file; a shared rule applies to
-every profile, while a named-profile rule applies only to that profile. A move
-places the rule first in its destination scope, which can change match priority.
-Top-level rules without `shared = true` apply only to the default profile.
-Rules moved to a
-different profile disappear from the current effective list. Log consumption
-pauses while the manager is open and resumes afterward, retaining the previous
+The source rule remains unchanged. The copy is inserted first in the destination
+profile, which can change match priority there. Copying a shared rule adds a
+profile-specific copy without affecting its shared source. Log consumption pauses
+while the manager is open and resumes afterward, retaining the previous
 pause/resume state.
 
 Changes apply immediately to subsequent log lines and persist across restarts.
@@ -241,8 +241,8 @@ With Pattern selected, press **Enter** to edit at a specific position;
 text, and **Escape** discards that text edit.
 
 Rules are inserted at the beginning of the current profile's scope. They are
-not shared automatically, including in the default profile. Use **m** in the
-rules manager to move a custom rule to another profile or the shared scope.
+not shared automatically, including in the default profile. Use **c** in the
+rules manager to copy a custom rule to another named profile.
 
 ### Editing a rule
 
@@ -272,17 +272,15 @@ validate and save; errors leave the editor open.
 
 Editing retains the selected rule's existing
 file, scope, priority, name, enabled state and mode unless you change Mode.
-Built-in patterns and their regex mode cannot be changed. Use the manager's
-**m** action to move a custom rule instead.
 
 The Style field accepts the full Rich style syntax, including custom colors and
 comma-separated capture-group styles. Styles with attributes beyond the
 foreground, background, bold and inverse controls, or multiple capture-group
 styles, remain unchanged unless edited in Style. The visual color and
 attribute controls are unavailable for those complex styles; edit Style
-directly to change them. Built-in patterns are read-only; editing a built-in
-style saves an override in the `.rules` file for the current profile or default
-rules.
+directly to change them. Built-in rules are not available in the manager. To
+change one, add an override in the `.rules` file for the current profile or
+default rules.
 
 To disable a custom rule manually, add `disabled = true` to its `[[rules]]`
 entry in its `.rules` file:
@@ -352,7 +350,7 @@ While `ctail` is following the file, press **Space** to pause/resume, **c** to
 open the rule editor for a persisted ad-hoc rule, **r** to open
 the rules manager, **?** to open the help panel, and **q** to quit. In the
 manager, check arrow-key navigation, **a** to add, **e** to edit, **d** to
-toggle, **x** to remove, **m** to move an ad-hoc rule, confirmation and
+toggle, **x** to remove, **c** to copy a rule to another profile, confirmation and
 **Escape** cancellation. In the editor, check color browsing, the preview,
 automatic regex mode, keyboard shortcuts, saving and cancellation;
 restart the app or run `ctail --show-rules` to verify the saved state.

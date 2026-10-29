@@ -26,7 +26,7 @@ from rich.style import Style
 from rich.table import Table
 from rich.text import Text
 from tomlkit.exceptions import ParseError
-from tomlkit.items import AoT, Array, InlineTable, Table as TOMLTable
+from tomlkit.items import AoT, Array
 from tomlkit.toml_document import TOMLDocument
 
 
@@ -765,28 +765,52 @@ def _edit_rule(
     _save_rule_document(path, document)
 
 
-def _move_ad_hoc_rule(
+def _rename_rule(
     rule: ColorRule,
     rules_path: Path,
-    destination: str | None,
+    name: str,
+    *,
+    profile: str | None = None,
+) -> None:
+    if not name.strip():
+        raise ValueError("Rule name must not be empty.")
+    _, current_rules, _ = _load_settings(rules_path.parent, profile)
+    if rule not in current_rules:
+        raise ValueError("Rules changed on disk; restart ctail before editing this rule.")
+    scope = profile if rule.source == "built-in" and rule.source_index is None else rule.profile_name
+    path = _scope_path(rules_path.with_name("ctail.toml"), scope) if rule.source == "built-in" else Path(rule.source)
+    document, entries = _read_rule_document(path, scope)
+    if rule.source_index is None:
+        if rule.source != "built-in":
+            raise ValueError("Rule has no saved TOML entry.")
+        entry = tomlkit.inline_table() if isinstance(entries, Array) else tomlkit.table()
+        entry.update({"builtin": True, "pattern": rule.pattern, "name": name})
+        entries.append(entry)
+    else:
+        entries[rule.source_index]["name"] = name
+    _save_rule_document(path, document)
+
+
+def _copy_ad_hoc_rule(
+    rule: ColorRule,
+    rules_path: Path,
+    destination: str,
     *,
     profile: str | None = None,
 ) -> bool:
     if rule.source == "built-in":
-        raise ValueError("Only custom rules can be moved.")
+        raise ValueError("Only custom rules can be copied.")
     if rule.source_index is None:
         raise ValueError("Rule has no saved TOML entry.")
     _, current_rules, _ = _load_settings(rules_path.parent, profile)
     if rule not in current_rules:
-        raise ValueError("Rules changed on disk; restart ctail before editing this rule.")
+        raise ValueError("Rules changed on disk; restart ctail before copying this rule.")
     config_path = rules_path.with_name("ctail.toml")
     config = _read_toml(config_path) if config_path.exists() else {}
     profiles = _parse_rule_profiles(config, config_path, allow_builtins=True)
-    if destination is not None and destination not in profiles:
+    if destination not in profiles:
         raise ValueError(f"Profile {destination!r} no longer exists.")
-    if (destination is None and rule.shared) or (
-        destination is not None and rule.profile_name == destination
-    ):
+    if rule.profile_name == destination:
         return False
 
     source_path = Path(rule.source)
@@ -794,46 +818,24 @@ def _move_ad_hoc_rule(
     document, source = _read_rule_document(source_path, rule.profile_name)
     if source_path == target_path:
         target_document = document
-        target = _rule_entries(
-            document, source_path, destination if source_path.suffix != ".rules" else None,
-            create_profile=destination is not None,
-        )
+        target = _rule_entries(document, source_path, destination)
     else:
         target_document, target = _read_rule_document(target_path, destination)
-        target_existed = target_path.exists()
-        original_target = tomlkit.parse(tomlkit.dumps(target_document))
-    entry = source.pop(rule.source_index)
-    if destination is None:
-        entry["shared"] = True
+    source_entry = source[rule.source_index].unwrap()
+    source_entry.pop("shared", None)
+    if any(
+        existing.unwrap() == source_entry
+        for existing in target
+    ):
+        return False
+
+    if isinstance(target, AoT):
+        entry = tomlkit.table()
     else:
-        entry.pop("shared", None)
-    if isinstance(target, AoT) and not isinstance(entry, TOMLTable):
-        converted = tomlkit.table()
-        converted.update(entry.unwrap())
-        entry = converted
-    elif isinstance(target, Array) and not isinstance(entry, InlineTable):
-        converted = tomlkit.inline_table()
-        converted.update(entry.unwrap())
-        entry = converted
+        entry = tomlkit.inline_table()
+    entry.update(source_entry)
     target.insert(0, entry)
-    if target_document is not document:
-        _save_rule_document(target_path, target_document)
-        try:
-            _save_rule_document(source_path, document)
-        except (OSError, TypeError, ValueError) as error:
-            try:
-                if target_existed:
-                    _save_rule_document(target_path, original_target)
-                else:
-                    target_path.unlink()
-            except (OSError, TypeError, ValueError) as rollback_error:
-                raise OSError(
-                    f"Rule move failed ({error}); destination rollback also failed "
-                    f"({rollback_error}). Check both rules files."
-                ) from rollback_error
-            raise
-    else:
-        _save_rule_document(source_path, document)
+    _save_rule_document(target_path, target_document)
     return True
 
 
@@ -1581,13 +1583,14 @@ def _manage_profiles(
 def _render_rule_manager(
     console: Console, rules: list[ColorRule], selected: int, message: str
 ) -> Group:
+    rules = [rule for rule in rules if rule.source != "built-in"]
     headings = ("", "Status", "Source", "Profile", "Type", "Name", "Pattern", "Style")
     rows = [
         (
             ">" if index == selected else " ",
             "disabled" if rule.disabled else "enabled",
-            "built-in" if rule.source == "built-in" else Path(rule.source).name,
-            "-" if rule.source == "built-in" else rule.profile_name or ("shared" if rule.shared else "-"),
+            Path(rule.source).name,
+            rule.profile_name or ("shared" if rule.shared else "-"),
             "regex" if rule.regex_enabled else "literal",
             rule.name or "-",
             repr(rule.pattern),
@@ -1624,8 +1627,11 @@ def _render_rule_manager(
     footer = [
         Text(""),
         Text("Up/Down: select  a: add  e: edit  d: enable/disable", style="dim"),
-        Text("x: remove  m: move  Esc: close", style="dim"),
-        Text(message, style="yellow"),
+        Text("r: rename  x: remove  c: copy-to  Esc: close", style="dim"),
+        Text(
+            message or ("No custom rules; default coloring remains active." if not rules else ""),
+            style="yellow" if message else "dim",
+        ),
         Text(position, style="dim"),
     ]
     footer_height = sum(
@@ -1662,24 +1668,32 @@ def _manage_rules(
     selected = 0
     message = ""
     mode = "list"
-    destinations: list[str | None] = []
+    destinations: list[str] = []
     destination_index = 0
+    rename_name = ""
+    cursor = 0
+
+    def listed_rules() -> list[ColorRule]:
+        return [rule for rule in rules if rule.source != "built-in"]
 
     def render() -> Group:
-        if mode == "move":
-            table = Table(title="Move ad-hoc rule to", box=None, show_header=False)
+        if mode == "rename":
+            return Group(
+                Text("Rename rule", style="bold"),
+                Text("Name: " + _editor_text_window(rename_name, cursor, max(1, console.width - 6))),
+                Text("Left/Right: move  Backspace: delete", style="dim"),
+                Text("Enter: save  Esc: cancel", style="dim"),
+                Text(message, style="yellow"),
+            )
+        if mode == "copy":
+            table = Table(title="Copy rule to", box=None, show_header=False)
             table.add_column("Destination")
             notice = Text(message, style="bold yellow")
             notice_height = len(console.render_lines(notice, pad=False)) if message else 0
             page_size = max(1, console.size.height - 5 - notice_height)
             start = (destination_index // page_size) * page_size
             for index in range(start, min(start + page_size, len(destinations))):
-                name = destinations[index] or "All profiles (shared)"
-                if (destinations[index] is None and rules[selected].shared) or (
-                    destinations[index] is not None
-                    and destinations[index] == rules[selected].profile_name
-                ):
-                    name += " (current scope)"
+                name = destinations[index]
                 row = Text(f"{'> ' if index == destination_index else '  '}{name}")
                 if index == destination_index:
                     row.stylize("reverse")
@@ -1701,7 +1715,35 @@ def _manage_rules(
                 if mode == "list":
                     return
                 mode, message = "list", "Canceled."
-            elif mode == "move":
+            elif mode == "rename":
+                message = ""
+                if key == "left":
+                    cursor = max(0, cursor - 1)
+                elif key == "right":
+                    cursor = min(len(rename_name), cursor + 1)
+                elif key == "backspace" and cursor:
+                    rename_name = rename_name[:cursor - 1] + rename_name[cursor:]
+                    cursor -= 1
+                elif key == "enter":
+                    try:
+                        _rename_rule(
+                            listed_rules()[selected], rules_path, rename_name, profile=profile
+                        )
+                    except (OSError, TypeError, ValueError) as error:
+                        message = f"Could not rename rule: {error}"
+                    else:
+                        try:
+                            _, loaded_rules, _ = _load_settings(rules_path.parent, profile)
+                        except (OSError, TypeError, ValueError) as error:
+                            mode, message = "list", f"Rule saved but could not reload: {error}"
+                        else:
+                            rules[:] = loaded_rules
+                            selected = min(selected, max(0, len(listed_rules()) - 1))
+                            mode, message = "list", "Renamed rule."
+                elif len(key) == 1 and key.isprintable():
+                    rename_name = rename_name[:cursor] + key + rename_name[cursor:]
+                    cursor += 1
+            elif mode == "copy":
                 if key == "up":
                     destination_index = max(0, destination_index - 1)
                     message = ""
@@ -1710,30 +1752,30 @@ def _manage_rules(
                     message = ""
                 elif key == "enter":
                     destination = destinations[destination_index]
-                    if (destination is None and rules[selected].shared) or (
-                        destination is not None
-                        and destination == rules[selected].profile_name
-                    ):
-                        message = "Already in this scope; choose another destination."
-                    else:
-                        label = destination or "all profiles (shared)"
-                        mode, message = "confirm_move", f"Move rule to {label}? y: confirm  n: cancel"
-            elif mode in ("confirm_delete", "confirm_move"):
+                    mode, message = (
+                        "confirm_copy", f"Copy rule to {destination}? y: confirm  n: cancel"
+                    )
+            elif mode in ("confirm_delete", "confirm_copy"):
                 if key.lower() == "n":
                     mode, message = "list", "Canceled."
                 elif key.lower() == "y":
-                    rule = rules[selected]
+                    rule = listed_rules()[selected]
                     action = mode
+                    copied = True
                     try:
                         if action == "confirm_delete":
                             _change_rule(rule, rules_path, delete=True, profile=profile)
                         else:
-                            _move_ad_hoc_rule(
+                            copied = _copy_ad_hoc_rule(
                                 rule, rules_path, destinations[destination_index], profile=profile
                             )
                     except (OSError, TypeError, ValueError) as error:
                         mode, message = "list", f"Could not change color rule: {error}"
                     else:
+                        if action == "confirm_copy" and not copied:
+                            mode, message = "list", "An identical rule already exists there."
+                            live.update(render(), refresh=True)
+                            continue
                         try:
                             _, loaded_rules, _ = _load_settings(rules_path.parent, profile)
                         except (OSError, TypeError, ValueError) as error:
@@ -1741,23 +1783,27 @@ def _manage_rules(
                             live.update(render(), refresh=True)
                             continue
                         rules[:] = loaded_rules
-                        selected = min(selected, max(0, len(rules) - 1))
+                        selected = min(selected, max(0, len(listed_rules()) - 1))
                         mode = "list"
-                        message = "Deleted rule." if action == "confirm_delete" else "Moved rule."
+                        message = "Deleted rule." if action == "confirm_delete" else "Copied rule."
             elif key == "up":
                 selected = max(0, selected - 1)
             elif key == "down":
-                selected = min(len(rules) - 1, selected + 1) if rules else 0
+                selected = min(len(listed_rules()) - 1, selected + 1) if listed_rules() else 0
             elif key.lower() == "a":
                 message = _rule_editor(console, live, rules, rules_path, keyboard_fd, profile)
                 selected = 0
-            elif rules and key.lower() == "e":
+            elif listed_rules() and key.lower() == "e":
                 message = _rule_editor(
-                    console, live, rules, rules_path, keyboard_fd, profile, rules[selected]
+                    console, live, rules, rules_path, keyboard_fd, profile, listed_rules()[selected]
                 )
-                selected = min(selected, max(0, len(rules) - 1))
-            elif rules and key.lower() == "d":
-                rule = rules[selected]
+                selected = min(selected, max(0, len(listed_rules()) - 1))
+            elif listed_rules() and key.lower() == "r":
+                rename_name = listed_rules()[selected].name or ""
+                cursor = len(rename_name)
+                mode, message = "rename", ""
+            elif listed_rules() and key.lower() == "d":
+                rule = listed_rules()[selected]
                 try:
                     _change_rule(rule, rules_path, delete=False, profile=profile)
                 except (OSError, TypeError, ValueError) as error:
@@ -1770,26 +1816,28 @@ def _manage_rules(
                     else:
                         rules[:] = loaded_rules
                         message = "Enabled rule." if rule.disabled else "Disabled rule."
-            elif rules and key.lower() == "x":
-                if rules[selected].source == "built-in":
-                    message = "Built-in rules cannot be deleted; disable them instead."
+            elif listed_rules() and key.lower() == "x":
+                mode, message = "confirm_delete", "Delete selected rule? y: confirm  n: cancel"
+            elif listed_rules() and key.lower() == "c":
+                rule = listed_rules()[selected]
+                try:
+                    config_path = rules_path.with_name("ctail.toml")
+                    config = _read_toml(config_path) if config_path.exists() else {}
+                    profiles = _parse_rule_profiles(config, config_path, allow_builtins=True)
+                except (OSError, TypeError, ValueError) as error:
+                    message = f"Could not list profiles: {error}"
                 else:
-                    mode, message = "confirm_delete", "Delete selected rule? y: confirm  n: cancel"
-            elif rules and key.lower() == "m":
-                rule = rules[selected]
-                if rule.source == "built-in":
-                    message = "Only custom rules can be moved."
-                else:
-                    try:
-                        config_path = rules_path.with_name("ctail.toml")
-                        config = _read_toml(config_path) if config_path.exists() else {}
-                        profiles = _parse_rule_profiles(config, config_path, allow_builtins=True)
-                    except (OSError, TypeError, ValueError) as error:
-                        message = f"Could not list profiles: {error}"
+                    destinations = [
+                        name for name in sorted(profiles)
+                        if name != rule.profile_name
+                    ]
+                    if not destinations:
+                        message = "No other profiles are available."
                     else:
-                        destinations = [None, *sorted(profiles)]
-                        destination_index = destinations.index(profile) if profile in destinations else 0
-                        mode, message = "move", ""
+                        destination_index = (
+                            destinations.index(profile) if profile in destinations else 0
+                        )
+                        mode, message = "copy", ""
             live.update(render(), refresh=True)
 
 
