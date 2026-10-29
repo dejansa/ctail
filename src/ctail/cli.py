@@ -1387,7 +1387,7 @@ def _select_profile(
     paths_by_profile: dict[str, list[str]] = {name: [] for name in profiles}
     for mapping in config.get("profile_paths", []):
         paths_by_profile[mapping["profile"]].extend(mapping["paths"])
-    selected = 0
+    selected = choices.index(active_profile) if active_profile in choices else 0
     message = ""
 
     def render() -> Group:
@@ -1424,11 +1424,11 @@ def _select_profile(
         table = make_table(start, end)
         actions = "n: Add a new profile"
         if source_file is not None:
-            actions += "\na: Associate selected profile with this file or directory"
+            actions += "\na: Associate selected profile with current file or directory"
         return Group(
             table,
             Text(""),
-            Text(actions, style="dim"),
+            Text(actions),
             Text(message, style="yellow"),
             Text("Up/Down: select", style="dim"),
             Text("Enter: apply", style="dim"),
@@ -1616,7 +1616,7 @@ def _render_rule_manager(
             rule = rules[index]
             style = rule.group_colors[0] if rule.group_colors else rule.color
             cells = [Text(value, style=style if cell in (6, 7) else None)
-                     for cell, value in enumerate(rows[index])]
+                        for cell, value in enumerate(rows[index])]
             if index == selected:
                 for cell in cells:
                     cell.stylize("reverse")
@@ -1626,8 +1626,8 @@ def _render_rule_manager(
     position = f"{selected + 1}/{len(rules)}" if rules else "0/0"
     footer = [
         Text(""),
-        Text("Up/Down: select  a: add  e: edit  d: enable/disable", style="dim"),
-        Text("r: rename  x: remove  c: copy-to  Esc: close", style="dim"),
+        Text("'Up/Down': select  'a': add  'e': edit  'd': enable/disable"),
+        Text("'r': rename  'x': remove  'c': copy-to  'Esc': close"),
         Text(
             message or ("No custom rules; default coloring remains active." if not rules else ""),
             style="yellow" if message else "dim",

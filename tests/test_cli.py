@@ -328,7 +328,15 @@ class ListingTests(unittest.TestCase):
             patch("ctail.cli._read_rule_key", return_value="enter"),
         ):
             self.assertEqual(
-                _select_profile(console, config_path, 11),
+                _select_profile(console, config_path, 11, active_profile="beta"),
+                (False, "beta"),
+            )
+        with (
+            patch("ctail.cli.Live"),
+            patch("ctail.cli._read_rule_key", return_value="enter"),
+        ):
+            self.assertEqual(
+                _select_profile(console, config_path, 11, active_profile=None),
                 (False, None),
             )
         with (
