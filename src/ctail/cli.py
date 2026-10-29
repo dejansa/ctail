@@ -401,12 +401,14 @@ def _load_settings(
 def _list_profiles(console: Console, config_path: Path) -> None:
     config = _read_toml(config_path) if config_path.exists() else {}
     profiles = _parse_rule_profiles(config, config_path, allow_builtins=True)
+    active_profile = _configured_active_profile(config, config_path)
     if not profiles:
         console.print("No named profiles configured.")
         return
     console.print("Configured profiles:")
     for name in sorted(profiles):
-        console.print(f"  {name}")
+        active_marker = " (active)" if name == active_profile else ""
+        console.print(f"  {name}{active_marker}")
 
 
 def _list_colors(console: Console) -> None:
@@ -430,15 +432,11 @@ def _show_rules(
         else "Coloring rules (highest priority first)"
     )
     table = Table(title=title)
-    for heading in ("Priority", "Source", "Status", "Mode", "Name", "Pattern", "Style"):
+    for heading in ("Priority", "Status", "Mode", "Name", "Pattern", "Style"):
         table.add_column(heading)
     for priority, rule in enumerate(rules, start=1):
-        source = rule.source
-        if rule.profile_name is not None:
-            source = f"{source} (profile: {rule.profile_name})"
         table.add_row(
             str(priority),
-            Text(source),
             "disabled" if rule.disabled else "enabled",
             "regex" if rule.regex_enabled else "literal",
             rule.name or "-",
@@ -1236,6 +1234,7 @@ def _select_profile(
     keyboard_fd: int,
     active_profile: str | None = None,
     source_file: str | None = None,
+    selected_index: int | None = None,
 ) -> tuple[bool | str, str | None] | None:
     config = _read_toml(config_path) if config_path.exists() else {}
     profiles = _parse_rule_profiles(config, config_path, allow_builtins=True)
@@ -1244,7 +1243,10 @@ def _select_profile(
     paths_by_profile: dict[str, list[str]] = {name: [] for name in profiles}
     for mapping in config.get("profile_paths", []):
         paths_by_profile[mapping["profile"]].extend(mapping["paths"])
-    selected = choices.index(active_profile) if active_profile in choices else 0
+    if selected_index is None:
+        selected = choices.index(active_profile) if active_profile in choices else 0
+    else:
+        selected = max(0, min(selected_index, len(choices) - 1))
     message = ""
 
     def render() -> Group:
@@ -1280,6 +1282,7 @@ def _select_profile(
             end += 1
         table = make_table(start, end)
         actions = "n: Add a new profile"
+        actions += "\nr: Manage selected profile rules"
         if source_file is not None:
             actions += "\na: Associate selected profile with current file or directory"
         return Group(
@@ -1305,6 +1308,8 @@ def _select_profile(
                 return False, choices[selected]
             if key in ("n", "N"):
                 return True, None
+            if key in ("r", "R"):
+                return "rules", choices[selected]
             if key in ("a", "A") and source_file is not None:
                 if choices[selected] is not None:
                     return "associate", choices[selected]
@@ -1375,10 +1380,12 @@ def _manage_profiles(
     session_only: bool = False,
 ) -> str | None:
     config_path = rules_path.with_name("ctail.toml")
+    selected_index: int | None = None
     while True:
         try:
             selection = _select_profile(
-                console, config_path, keyboard_fd, profile, source_file
+                console, config_path, keyboard_fd, profile, source_file,
+                selected_index=selected_index,
             )
         except (OSError, TypeError, ValueError) as error:
             console.print(f"Could not list profiles: {error}", style="bold red")
@@ -1390,6 +1397,31 @@ def _manage_profiles(
         if add_new == "associate":
             assert source_file is not None and selected_profile is not None
             _associate_profile(console, config_path, keyboard_fd, source_file, selected_profile)
+            continue
+        if add_new == "rules":
+            try:
+                _, selected_rules, _ = _load_settings(rules_path.parent, selected_profile)
+            except (OSError, TypeError, ValueError) as error:
+                console.print(
+                    f"Could not load rules for profile "
+                    f"{selected_profile or '(default)'!r}: {error}",
+                    style="bold red",
+                )
+            else:
+                _manage_rules(
+                    console, selected_rules, rules_path, keyboard_fd,
+                    profile=selected_profile,
+                )
+            try:
+                config = _read_toml(config_path) if config_path.exists() else {}
+                profiles = _parse_rule_profiles(config, config_path, allow_builtins=True)
+            except (OSError, TypeError, ValueError) as error:
+                console.print(f"Could not reload profiles: {error}", style="bold red")
+                return profile
+            choices = [None, *sorted(profiles)]
+            selected_index = (
+                choices.index(selected_profile) if selected_profile in choices else 0
+            )
             continue
         if add_new:
             name = _prompt_profile_name(console, keyboard_fd, original_terminal)
@@ -1942,6 +1974,11 @@ def main() -> None:
         help="list configured coloring-rule profiles and exit",
     )
     parser.add_argument(
+        "-shp", "--show_profiles",
+        action="store_true",
+        help="open the interactive profile selector",
+    )
+    parser.add_argument(
         "-shr", "--show-rules",
         action="store_true",
         help="show coloring rules, optionally scoped to a profile, and exit",
@@ -2003,12 +2040,9 @@ def main() -> None:
         if options.version:
             console.print(f"ctail version {version('ctail')}")
             return
-        process = _tail_process(tail_arguments) if has_file_source else None
-        source = process.stdout if process is not None else sys.stdin.buffer
-        if source is None:
-            raise RuntimeError("no input stream available")
-
-        if process is not None and sys.stdin.isatty() and sys.stdout.isatty():
+        if options.show_profiles:
+            if not sys.stdin.isatty() or not sys.stdout.isatty():
+                raise RuntimeError("--show_profiles requires an interactive terminal")
             keyboard_fd = sys.stdin.fileno()
             original_terminal = termios.tcgetattr(keyboard_fd)
             active_terminal = termios.tcgetattr(keyboard_fd)
@@ -2016,6 +2050,39 @@ def main() -> None:
             active_terminal[6][termios.VMIN] = 1
             active_terminal[6][termios.VTIME] = 0
             termios.tcsetattr(keyboard_fd, termios.TCSADRAIN, active_terminal)
+            active_profile = _manage_profiles(
+                console,
+                rules,
+                rules_path,
+                keyboard_fd,
+                original_terminal,
+                active_profile,
+                source_file=source_file,
+                session_only=automatic_profile,
+            )
+            if not tail_arguments:
+                return
+            show_unmatched, rules, rules_path = _load_settings(
+                config_dir, active_profile
+            )
+        process = _tail_process(tail_arguments) if has_file_source else None
+        if process is None and keyboard_fd is not None and original_terminal is not None:
+            termios.tcsetattr(keyboard_fd, termios.TCSADRAIN, original_terminal)
+            keyboard_fd = None
+            original_terminal = None
+        source = process.stdout if process is not None else sys.stdin.buffer
+        if source is None:
+            raise RuntimeError("no input stream available")
+
+        if process is not None and sys.stdin.isatty() and sys.stdout.isatty():
+            if keyboard_fd is None:
+                keyboard_fd = sys.stdin.fileno()
+                original_terminal = termios.tcgetattr(keyboard_fd)
+                active_terminal = termios.tcgetattr(keyboard_fd)
+                active_terminal[3] &= ~(termios.ICANON | termios.ECHO)
+                active_terminal[6][termios.VMIN] = 1
+                active_terminal[6][termios.VTIME] = 0
+                termios.tcsetattr(keyboard_fd, termios.TCSADRAIN, active_terminal)
             console.print(
                 "Enter: blank line  Space: pause/resume  p: profile  c: add rule  "
                 "r: rules manager  ?: help  q: quit", style="dim",

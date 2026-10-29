@@ -141,7 +141,9 @@ manager to copy a custom rule to another named profile.
 Press **p** to open the profile selector. The table shows each profile and its
 configured path patterns; a dash means there are no associated paths.
 **(default)** is the first option; use **Up/Down** and **Enter** to select a
-profile, or **Escape** to cancel.
+profile, **r** to manage rules for the highlighted profile, or **Escape** to
+cancel. The rules manager lets you add and edit rules without activating or
+changing the saved profile.
 The **n** action shown below the profile list prompts for a name, saves a new
 empty `NAME.rules.toml` profile, and activates it as the saved profile. Selecting
 **(default)** removes `active_profile` from the configuration. Adding a rule
@@ -166,6 +168,7 @@ Use `--no-color` to disable colored output.
 ctail -lsc                 # or --list-colors
 ctail -shr                 # or --show-rules
 ctail -lsp                 # or --list-profiles
+ctail -shp                 # or --show_profiles
 ctail -lsc -shr            # show both and exit
 ctail --show-rules --no-color
 ```
@@ -176,6 +179,11 @@ valid configuration files.
 
 `--list-profiles` prints the named profiles configured in
 by `*.rules.toml` files. It accepts the short alias `-lsp`.
+
+`--show_profiles` (or `-shp`) opens the interactive profile selector before
+processing input. Without file arguments, Enter applies the selection and exits,
+and Escape cancels and exits. With file arguments, closing the selector continues
+to normal file processing. It requires stdin and stdout to be terminals.
 
 `--show-rules` without a profile lists the default rules in priority order:
 shared rules, default rules from `default.rules.toml`, and

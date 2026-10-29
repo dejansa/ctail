@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import termios
 import time
 import tomllib
 import unittest
@@ -262,6 +263,16 @@ class ProfilePathTests(unittest.TestCase):
             result = _select_profile(console, self.config_path, 11, source_file="file.log")
         self.assertEqual(result, ("associate", "one"))
 
+    def test_selector_rules_action_uses_highlighted_profile(self):
+        self.config_path.write_text("[profiles.one]\n[profiles.two]\n")
+        console = Console(file=io.StringIO(), color_system=None)
+        with (
+            patch("ctail.cli.Live"),
+            patch("ctail.cli._read_rule_key", side_effect=["down", "down", "r"]),
+        ):
+            result = _select_profile(console, self.config_path, 11, active_profile="one")
+        self.assertEqual(result, ("rules", "two"))
+
     def test_selector_displays_configured_paths_for_each_profile(self):
         self.config_path.write_text(
             '[[profile_paths]]\nprofile = "one"\n'
@@ -324,6 +335,48 @@ class ProfilePathTests(unittest.TestCase):
 
 
 class ProfilePathPtyTests(unittest.TestCase):
+    def test_standalone_profile_selector_exits_and_restores_terminal(self):
+        for option in ("-shp", "--show_profiles"):
+            for key, expected_profile in ((b"\x1b[B\r", "two"), (b"\x1b", "one")):
+                with self.subTest(option=option, key=key), tempfile.TemporaryDirectory() as home:
+                    config_dir = Path(home) / ".config" / "ctail"
+                    config_dir.mkdir(parents=True)
+                    config_path = config_dir / "ctail.toml"
+                    config_path.write_text(
+                        'active_profile = "one"\n[profiles.one]\n[profiles.two]\n'
+                    )
+                    master, slave = pty.openpty()
+                    original_terminal = termios.tcgetattr(slave)
+                    process = subprocess.Popen(
+                        [sys.executable, "-c", "from ctail.cli import main; main()", option],
+                        stdin=slave, stdout=slave, stderr=slave,
+                        env=dict(os.environ, HOME=home, TERM="xterm-256color"),
+                    )
+                    try:
+                        output = bytearray()
+                        deadline = time.monotonic() + 8
+                        while b"Select profile" not in output:
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0 or not select.select(
+                                [master], [], [], remaining
+                            )[0]:
+                                self.fail(f"Profile selector did not open: {bytes(output)!r}")
+                            output.extend(os.read(master, 65536))
+                        os.write(master, key)
+                        process.wait(timeout=2)
+                        self.assertEqual(process.returncode, 0)
+                        self.assertEqual(termios.tcgetattr(slave), original_terminal)
+                        self.assertEqual(
+                            tomllib.loads(config_path.read_text())["active_profile"],
+                            expected_profile,
+                        )
+                    finally:
+                        if process.poll() is None:
+                            process.terminate()
+                            process.wait(timeout=5)
+                        os.close(master)
+                        os.close(slave)
+
     @unittest.skipUnless(shutil.which("less"), "less is required")
     def test_real_less_and_piped_input_choose_expected_profiles(self):
         with tempfile.TemporaryDirectory() as home:
@@ -405,6 +458,66 @@ class ProfilePathPtyTests(unittest.TestCase):
             self.assertEqual(tomllib.loads(config_path.read_text())["active_profile"], "other")
             rules = tomllib.loads(config_path.read_text())
             self.assertEqual(rules["profiles"]["logs"]["rules"][0]["pattern"], "scoped-rule")
+
+    def test_profile_selector_opens_rules_manager_for_highlighted_profile(self):
+        with tempfile.TemporaryDirectory() as home:
+            root = Path(home)
+            config_dir = root / ".config" / "ctail"
+            config_dir.mkdir(parents=True)
+            config_path = config_dir / "ctail.toml"
+            log = root / "file.log"
+            log.touch()
+            config_path.write_text(
+                'active_profile = "active"\n'
+                "[profiles.active]\n"
+                "[profiles.other]\n"
+            )
+            master, slave = pty.openpty()
+            process = subprocess.Popen(
+                [sys.executable, "-c", "from ctail.cli import main; main()", "-f", str(log)],
+                stdin=slave, stdout=slave, stderr=slave,
+                env=dict(os.environ, HOME=home, TERM="xterm-256color"),
+            )
+
+            def wait_for(marker):
+                output = bytearray()
+                deadline = time.monotonic() + 8
+                while marker not in output:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or not select.select([master], [], [], remaining)[0]:
+                        self.fail(f"Timed out waiting for {marker!r}: {bytes(output)!r}")
+                    output.extend(os.read(master, 65536))
+
+            try:
+                wait_for(b"Space: pause/resume")
+                os.write(master, b"p")
+                wait_for(b"Select profile")
+                os.write(master, b"\x1b[Br")
+                wait_for(b"Rules manager")
+                os.write(master, b"a")
+                wait_for(b"Add rule")
+                os.write(master, b"\rselected-profile-rule\r\x1b[C\r")
+                wait_for(b"Added rule.")
+                os.write(master, b"\x1b")
+                wait_for(b"Select profile")
+                os.write(master, b"\x1b")
+                time.sleep(0.3)
+                os.write(master, b"q")
+                process.wait(timeout=5)
+                self.assertEqual(process.returncode, 0)
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                    process.wait(timeout=5)
+                os.close(master)
+                os.close(slave)
+
+            data = tomllib.loads(config_path.read_text())
+            self.assertEqual(data["active_profile"], "active")
+            self.assertEqual(
+                data["profiles"]["other"]["rules"][0]["pattern"],
+                "selected-profile-rule",
+            )
 
     def test_association_is_confirmed_and_used_on_next_start(self):
         with tempfile.TemporaryDirectory() as home:
