@@ -34,26 +34,26 @@ pipx install 'git+ssh://git@gitlab.com/aviatnetworks/qa/tools/ctail.git'
 
 Both commands install the `ctail` command into the tool's executable path
 (typically `~/.local/bin`). On the first run, `ctail` creates
-`~/.config/ctail/` and copies in an example `ctail.toml` if one does not
-already exist. Existing configuration is never replaced, including when
+`~/.config/ctail/` and copies in an example `ctail.toml`, `default.rules`,
+and `http-access.rules` if the configuration does not already exist. Existing configuration is never replaced, including when
 upgrading the tool. The starter files are maintained in the repository's
 top-level `config/` folder. Add `~/.local/bin` to `PATH` if it is not already
 there.
 
-Configuration lives in `~/.config/ctail/ctail.toml`. Rules are applied only
+Settings live in `~/.config/ctail/ctail.toml`; coloring rules live in
+TOML-formatted `.rules` files in the same directory. Rules are applied only
 to the matching part of a line; regex rules are checked in file order, and
 earlier rules take precedence when matches overlap. Unmatched lines are hidden
 by default, as in the original Bash script. Set `show_unmatched = true` to
 display them.
 
 Use `--profile NAME` (or `-p NAME`) to select a named set of rules for a
-particular log format. Define profiles in `~/.config/ctail/ctail.toml`.
+particular log format. Define each profile in a file named `NAME.rules`.
 Selecting a profile saves `active_profile = "NAME"` in that file; subsequent
 runs use the saved profile unless another `--profile` is supplied. Without a
-saved or explicit profile, the top-level rules in `ctail.toml` are used.
-Selecting a profile replaces those top-level rules. Built-in rules and
-top-level rules in `rules.toml` remain active. Temporary rules can also be
-grouped under matching `[profiles.NAME]` sections in `rules.toml`.
+saved or explicit profile, `default.rules` is used. Selecting a profile
+replaces the default-only rules. Built-in rules and rules in `default.rules`
+marked `shared = true` remain active.
 
 To select a profile automatically for a file, add ordered path mappings to
 `ctail.toml`:
@@ -70,11 +70,9 @@ paths = [
 profile = "http-access"
 paths = ["/var/log/nginx/*.log"]
 
-[profiles.asaklogs]
-# Add [[profiles.asaklogs.rules]] entries here.
 ```
 
-Each mapping references a profile defined in `ctail.toml`. A path ending in
+Each mapping references an existing profile file such as `asaklogs.rules`. A path ending in
 `/` matches files directly in that directory, not in subdirectories. A path
 without wildcards matches a single file; `*`, `?`, and character classes match
 within one path component, while `**` matches across directory levels. For
@@ -93,27 +91,10 @@ patterns in the configuration; shell-expanded arguments that produce multiple
 files do not select a profile automatically. Use `--profile` when automatic
 detection is not possible. Listing commands do not match paths.
 
+For example, `http-access.rules` contains:
+
 ```toml
-show_unmatched = true
-
 [[rules]]
-name = "Log timestamp"
-pattern = '\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}'
-color = "bright_black"
-
-[[rules]]
-name = "Errors and fatal messages"
-pattern = '(?i)\[(?:error|fatal)\]'
-color = "bold bright_red"
-
-[[rules]]
-name = "Debug messages"
-pattern = '(?i)\[debug\]'
-color = "bright_green"
-
-[profiles.http-access]
-
-[[profiles.http-access.rules]]
 name = "HTTP request method"
 pattern = '\b(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\b'
 color = "bright_cyan"
@@ -153,7 +134,7 @@ rules manager, **?** to show the interactive
 command list, or **q** to quit. The
 **f** toggle applies only to the current run; it does not change
 `ctail.toml`. The help panel closes when any key is pressed. Rules created
-with **c** are saved in `~/.config/ctail/rules.toml`. A named active profile
+with **c** are saved in the selected profile's `.rules` file. A named active profile
 is the default destination, but the editor can instead save a shared rule.
 Without an active named profile, new rules are shared.
 
@@ -162,10 +143,10 @@ configured path patterns; a dash means there are no associated paths.
 **(default)** is the first option; use **Up/Down** and **Enter** to select a
 profile, or **Escape** to cancel.
 The **n** action shown below the profile list prompts for a name, saves a new
-empty profile in `ctail.toml`, and activates it as the saved profile. Selecting
+empty `NAME.rules` profile, and activates it as the saved profile. Selecting
 **(default)** removes `active_profile` from the configuration. Adding a rule
-with **c** while a named profile is active defaults to that profile in
-`rules.toml`; with **(default)** active, new ad-hoc rules are shared.
+with **c** while a named profile is active defaults to that profile's file;
+with **(default)** active, new interactive rules are shared in `default.rules`.
 If a path mapping selected the profile at startup, the terminal shows the
 selected profile, and changing or creating a profile with **p** affects only
 the current run. The profile definition and its rules are still saved. For
@@ -194,12 +175,12 @@ of foreground/background styles and custom color syntax. It does not require
 valid configuration files.
 
 `--list-profiles` prints the named profiles configured in
-`~/.config/ctail/ctail.toml`. It accepts the short alias `-lsp`.
+by `*.rules` files. It accepts the short alias `-lsp`.
 
 `--show-rules` without a profile lists the default rules in priority order:
-shared ad-hoc rules, top-level rules from `~/.config/ctail/ctail.toml`, and
+shared rules, default rules from `default.rules`, and
 built-in rules. With `--profile NAME`, it lists only rules declared for that
-profile in either configuration file; shared and built-in rules are omitted.
+profile's `.rules` file; shared and built-in rules are omitted.
 Each entry shows its source, enabled/disabled status, regex/literal mode,
 optional name, pattern, and style rendered in its configured colors.
 
@@ -220,22 +201,24 @@ Use **Up/Down** to select a rule:
 - **e** opens the same editor for the selected rule.
 - **d** toggles the selected rule's enabled/disabled state.
 - **x** removes a custom rule after confirmation. Built-ins cannot be removed.
-- **m** moves an ad-hoc `rules.toml` rule to a named profile or to
+- **m** moves a custom rule to a named profile or to
   **All profiles (shared)**. The current named profile is selected initially;
   without one, the shared destination is selected. Confirm the scope change.
-  Moving to the existing scope changes nothing.
+  The rule's existing scope is marked in the destination list. Selecting it
+  changes nothing and prompts you to choose another destination or cancel.
 - **Escape** cancels a pending action or closes the manager.
 
-Moving a rule changes its scope within `rules.toml`; a shared rule applies to
+Moving a rule changes its scope and, when needed, its file; a shared rule applies to
 every profile, while a named-profile rule applies only to that profile. A move
 places the rule first in its destination scope, which can change match priority.
-There is no ad-hoc scope exclusive to the default profile. Rules moved to a
+Top-level rules without `shared = true` apply only to the default profile.
+Rules moved to a
 different profile disappear from the current effective list. Log consumption
 pauses while the manager is open and resumes afterward, retaining the previous
 pause/resume state.
 
 Changes apply immediately to subsequent log lines and persist across restarts.
-Custom rules are changed in their own source file; existing comments, other
+Custom rules are changed in their `.rules` files; existing comments, other
 rules, and unrelated settings are preserved. Failed saves are reported without
 changing the running rule list.
 
@@ -272,7 +255,7 @@ named profile and **All profiles (shared)**. With no named profile, only the
 shared destination is available. Editing retains the selected rule's existing
 file, scope, priority, name, enabled state and mode unless you change Mode.
 Built-in patterns and their regex mode cannot be changed. Use the manager's
-**m** action to move an ad-hoc rule instead.
+**m** action to move a custom rule instead.
 
 The Style field accepts the full Rich style syntax, including custom colors and
 comma-separated capture-group styles. Styles with attributes beyond the
@@ -280,11 +263,11 @@ foreground, background, bold and inverse controls, or multiple capture-group
 styles, remain unchanged unless edited in Style. The visual color and
 attribute controls are unavailable for those complex styles; edit Style
 directly to change them. Built-in patterns are read-only; editing a built-in
-style saves an override in `ctail.toml` for the current profile or default
+style saves an override in the `.rules` file for the current profile or default
 rules.
 
 To disable a custom rule manually, add `disabled = true` to its `[[rules]]`
-entry in either configuration file:
+entry in its `.rules` file:
 
 ```toml
 [[rules]]
@@ -297,7 +280,7 @@ disabled = true
 can still match the same text.
 
 Built-ins have no file entry initially. Toggling one creates an explicit
-override in `ctail.toml`, identified by `builtin = true` and its exact built-in
+override in the active `.rules` file, identified by `builtin = true` and its exact built-in
 regex pattern. For example, disable the built-in debug coloring with:
 
 ```toml
@@ -308,7 +291,7 @@ disabled = true
 ```
 
 Set `disabled = false` to re-enable it. Built-in overrides are only allowed in
-`ctail.toml` and do not create duplicate rules. A separate custom rule matching
+`.rules` files and do not create duplicate rules. A separate custom rule matching
 the same text remains independent. Manual file edits take effect after
 restarting `ctail`.
 
@@ -366,18 +349,32 @@ starts a new rule, so a configuration can define any number of rules with the
 same `pattern` and `color` keys. In contrast, `[rules]` defines only one table
 and cannot be repeated to add more rules.
 
-The runtime configuration directory and both starter files are created
+The runtime configuration directory and starter files are created
 automatically on the first run if they are missing. The examples are maintained
-in the repository's top-level `config/` folder. Interactive rules are saved in
-the separate `~/.config/ctail/rules.toml` file without changing the main
-configuration. To add ad-hoc rules manually, save the example below as
-`~/.config/ctail/rules.toml`.
+in the repository's top-level `config/` folder. Existing installations are not
+automatically migrated. Back up `ctail.toml`, then move its top-level `[[rules]]`
+entries to `default.rules` and each `[profiles.NAME]` profile's rules to
+`NAME.rules`, changing each `[[profiles.NAME.rules]]` header to `[[rules]]`.
+Preserve the order and `shared` flags, including built-in overrides. Leave
+settings and `[[profile_paths]]` in `ctail.toml`. Empty profiles need an empty
+`NAME.rules` file. Legacy embedded rules remain readable, but a profile or
+default rules cannot be defined in both formats. The older `rules.toml` file
+is not read; migrate its rules separately.
 
 Example main configuration (`ctail.toml`):
 
 ```toml
 show_unmatched = true
+active_profile = "nginx"
 
+[[profile_paths]]
+profile = "nginx"
+paths = ["/var/log/nginx/*.log"]
+```
+
+Example `default.rules`:
+
+```toml
 [[rules]]
 name = "Log timestamp"
 pattern = '\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}'
@@ -393,43 +390,28 @@ name = "Debug messages"
 pattern = '(?i)\[debug\]'
 color = "bright_green"
 
-[profiles.nginx]
-
-[[profiles.nginx.rules]]
-name = "Nginx request method"
-pattern = '\b(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\b'
-color = "bright_cyan"
-```
-
-Example ad-hoc rules (`rules.toml`):
-
-```toml
 [[rules]]
 name = "Request identifier"
 pattern = "request_id="
 color = "bright_cyan"
 regex = false
-
-[[rules]]
-name = "Cache misses"
-pattern = "cache-miss"
-color = "orange3"
-regex = false
-
-[profiles.nginx]
-
-[[profiles.nginx.rules]]
-name = "Nginx upstream status"
-pattern = "upstream_status="
-color = "yellow"
-regex = false
+shared = true
 ```
 
-These sample ad-hoc rules match literal text. Rules added interactively default
-to literal matching but can use regex mode; they are saved in `rules.toml`.
-Top-level `[[rules]]` entries
-are shared by every profile; rules under `[profiles.NAME]` apply only to the
-matching profile in `ctail.toml`. Interactive rules default to the active named
+Example `nginx.rules`:
+
+```toml
+[[rules]]
+name = "Nginx request method"
+pattern = '\b(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\b'
+color = "bright_cyan"
+```
+
+Rules added interactively default to literal matching but can use regex mode.
+Entries in `default.rules` apply to the default profile unless marked
+`shared = true`, in which case they apply to every profile and take priority
+over profile-specific rules. Entries in `NAME.rules` apply only to the
+matching profile. Interactive rules default to the active named
 profile, but can be saved as shared rules; without a named profile they are
 shared. The active profile is persistent, so after selecting
 it once you can start ctail without `--profile`. To change it for a run and
@@ -439,8 +421,7 @@ persist that change, supply a different profile explicitly:
 ctail --profile nginx -f /var/log/nginx/access.log
 ```
 
-The profile name is the key beneath `[profiles]` in `ctail.toml`. Profiles
-replace that file's top-level `[[rules]]`; shared and matching temporary rules,
-built-in rules, and global settings such as `show_unmatched` still apply.
-`--show-rules --profile nginx` displays the active rules and identifies
-profile-specific entries.
+The profile name is the filename before `.rules`. Profiles
+replace the default-only rules; shared rules, built-in
+rules, and global settings such as `show_unmatched` still apply.
+`--show-rules --profile nginx` displays the profile-specific rules.

@@ -42,6 +42,7 @@ class ColorRule:
     name: str | None = None
     group_colors: tuple[str, ...] = ()
     profile_name: str | None = None
+    shared: bool = False
 
 
 DEFAULT_RULES = (
@@ -58,7 +59,7 @@ def _config_directory() -> Path:
 
 def _example_config_directory() -> Path:
     installed_config_dir = Path(__file__).resolve().parent
-    filenames = ("ctail.toml", "rules.toml")
+    filenames = ("ctail.toml",)
     if all((installed_config_dir / name).is_file() for name in filenames):
         return installed_config_dir
 
@@ -73,7 +74,9 @@ def _initialize_config(config_dir: Path) -> None:
     config_dir.mkdir(parents=True, exist_ok=True)
 
     example_dir = _example_config_directory()
-    for name in ("ctail.toml", "rules.toml"):
+    if (config_dir / "ctail.toml").exists():
+        return
+    for name in ("default.rules", "http-access.rules", "ctail.toml"):
         config_path = config_dir / name
         if config_path.exists():
             continue
@@ -121,6 +124,7 @@ def _parse_rules(
         builtin = item.get("builtin", False)
         disabled = item.get("disabled", False)
         regex_enabled = item.get("regex", True)
+        shared = item.get("shared", False)
         if name is not None and not isinstance(name, str):
             raise TypeError(f"{source}: rule {index} 'name' must be a string")
         if name == "":
@@ -134,7 +138,7 @@ def _parse_rules(
         if builtin and (not allow_builtins or pattern not in dict(DEFAULT_RULES)):
             raise ValueError(
                 f"{source}: rule {index} must reference a known built-in "
-                "pattern in ctail.toml"
+                "pattern in a rules file"
             )
         color = item.get("color", dict(DEFAULT_RULES).get(pattern) if builtin else None)
         if not isinstance(color, str):
@@ -150,6 +154,10 @@ def _parse_rules(
             raise TypeError(f"{source}: rule {index} 'disabled' must be true or false")
         if not isinstance(regex_enabled, bool):
             raise TypeError(f"{source}: rule {index} 'regex' must be true or false")
+        if not isinstance(shared, bool):
+            raise TypeError(f"{source}: rule {index} 'shared' must be true or false")
+        if shared and (profile_name is not None or builtin):
+            raise ValueError(f"{source}: rule {index}: only top-level custom rules can be shared")
         if builtin and not regex_enabled:
             raise ValueError(f"{source}: rule {index}: built-in patterns must use regex")
         try:
@@ -175,7 +183,7 @@ def _parse_rules(
         parsed.append(ColorRule(
             pattern, color, compiled, regex_enabled,
             "built-in" if builtin else str(source), disabled, index - 1,
-            name=name, group_colors=group_colors, profile_name=profile_name,
+            name=name, group_colors=group_colors, profile_name=profile_name, shared=shared,
         ))
     return parsed
 
@@ -201,6 +209,18 @@ def _parse_rule_profiles(
             source,
             allow_builtins=allow_builtins,
             profile_name=name,
+        )
+    for path in sorted(source.parent.glob("*.rules")):
+        if path.name == "default.rules":
+            continue
+        name = path.stem
+        if name in parsed:
+            raise ValueError(f"{path}: profile {name!r} is also defined in {source}")
+        file_data = _read_toml(path)
+        if set(file_data) - {"rules"}:
+            raise ValueError(f"{path}: rules files may only contain 'rules'")
+        parsed[name] = _parse_rules(
+            file_data.get("rules", []), path, allow_builtins=True, profile_name=name
         )
     return parsed
 
@@ -323,7 +343,6 @@ def _load_settings(
     config_dir: Path, profile: str | None = None
 ) -> tuple[bool, list[ColorRule], Path]:
     config_path = config_dir / "ctail.toml"
-    rules_path = config_dir / "rules.toml"
     show_unmatched = False
     configured_rules: list[ColorRule] = []
     configured_profiles: dict[str, list[ColorRule]] = {}
@@ -341,20 +360,17 @@ def _load_settings(
         )
         _parse_profile_paths(config, config_path, configured_profiles)
 
-    ad_hoc_rules: list[ColorRule] = []
-    profile_ad_hoc_rules: dict[str, list[ColorRule]] = {}
-    if rules_path.exists():
-        rules_data = _read_toml(rules_path)
-        ad_hoc_rules = _parse_rules(rules_data.get("rules", []), rules_path)
-        profile_ad_hoc_rules = _parse_rule_profiles(rules_data, rules_path)
-        unknown_profiles = sorted(set(profile_ad_hoc_rules) - set(configured_profiles))
-        if unknown_profiles:
-            names = ", ".join(repr(name) for name in unknown_profiles)
-            raise ValueError(
-                f"{rules_path}: temporary rules reference profiles not defined "
-                f"in {config_path}: {names}"
-            )
+    default_path = config_dir / "default.rules"
+    if default_path.exists():
+        if configured_rules:
+            raise ValueError(f"{config_path}: default rules are also defined in {default_path}")
+        data = _read_toml(default_path)
+        if set(data) - {"rules"}:
+            raise ValueError(f"{default_path}: rules files may only contain 'rules'")
+        configured_rules = _parse_rules(data.get("rules", []), default_path, allow_builtins=True)
 
+    shared_rules = [rule for rule in configured_rules if rule.shared]
+    configured_rules = [rule for rule in configured_rules if not rule.shared]
     if profile is not None:
         if profile not in configured_profiles:
             available = ", ".join(sorted(configured_profiles)) or "none"
@@ -375,11 +391,10 @@ def _load_settings(
         overrides.get(pattern, ColorRule(pattern, color, re.compile(pattern)))
         for pattern, color in DEFAULT_RULES
     ]
-    scoped_ad_hoc_rules = profile_ad_hoc_rules.get(profile, []) if profile else []
     return (
         show_unmatched,
-        ad_hoc_rules + scoped_ad_hoc_rules + configured_rules + defaults,
-        rules_path,
+        shared_rules + configured_rules + defaults,
+        config_path,
     )
 
 
@@ -501,11 +516,14 @@ def _read_rule_document(
     data = document.unwrap()
     _parse_rules(
         data.get("rules", []), path,
-        allow_builtins=path.name == "ctail.toml",
+        allow_builtins=path.name == "ctail.toml" or path.suffix == ".rules",
+        profile_name=profile_name if path.suffix == ".rules" else None,
     )
-    _parse_rule_profiles(
-        data, path, allow_builtins=path.name == "ctail.toml"
-    )
+    if path.suffix == ".rules":
+        if set(data) - {"rules"}:
+            raise ValueError(f"{path}: rules files may only contain 'rules'")
+        return document, _rule_entries(document, path, None)
+    _parse_rule_profiles(data, path, allow_builtins=path.name == "ctail.toml")
     return document, _rule_entries(document, path, profile_name, create_profile=create_profile)
 
 
@@ -542,10 +560,14 @@ def _rule_entries(
 def _save_rule_document(path: Path, document: TOMLDocument) -> None:
     _parse_rules(
         document.unwrap().get("rules", []), path,
-        allow_builtins=path.name == "ctail.toml",
+        allow_builtins=path.name == "ctail.toml" or path.suffix == ".rules",
+        profile_name=path.stem if path.suffix == ".rules" and path.stem != "default" else None,
     )
-    profiles = _parse_rule_profiles(
-        document.unwrap(), path, allow_builtins=path.name == "ctail.toml"
+    if path.suffix == ".rules" and set(document.unwrap()) - {"rules"}:
+        raise ValueError(f"{path}: rules files may only contain 'rules'")
+    profiles = (
+        _parse_rule_profiles(document.unwrap(), path, allow_builtins=True)
+        if path.name == "ctail.toml" else {}
     )
     if path.name == "ctail.toml":
         _parse_profile_paths(document.unwrap(), path, profiles)
@@ -591,8 +613,9 @@ def _write_active_profile(path: Path, profile_name: str | None) -> None:
 
 
 def _write_profile(path: Path, profile_name: str) -> None:
-    if not profile_name:
-        raise ValueError("profile name must not be empty")
+    if (not profile_name or profile_name in {".", "..", "default"}
+            or "/" in profile_name or "\\" in profile_name or "\0" in profile_name):
+        raise ValueError("invalid or reserved profile name")
     if path.exists():
         try:
             document = tomlkit.parse(path.read_text(encoding="utf-8"))
@@ -607,10 +630,34 @@ def _write_profile(path: Path, profile_name: str) -> None:
     if profile_name in profiles:
         raise ValueError(f"{path}: profile {profile_name!r} already exists")
 
+    if _uses_rule_files(path):
+        profile_path = path.with_name(f"{profile_name}.rules")
+        with profile_path.open("x", encoding="utf-8"):
+            pass
+        return
+
     if "profiles" not in document:
         document["profiles"] = tomlkit.table()
     document["profiles"][profile_name] = tomlkit.table()
     _save_rule_document(path, document)
+
+
+def _uses_rule_files(config_path: Path) -> bool:
+    if any(config_path.parent.glob("*.rules")):
+        return True
+    data = _read_toml(config_path) if config_path.exists() else {}
+    return "rules" not in data and "profiles" not in data
+
+
+def _scope_path(config_path: Path, profile_name: str | None) -> Path:
+    config = _read_toml(config_path) if config_path.exists() else {}
+    if profile_name is None and "rules" in config:
+        return config_path
+    if profile_name is not None and profile_name in config.get("profiles", {}):
+        return config_path
+    if not _uses_rule_files(config_path):
+        return config_path
+    return config_path.with_name(f"{profile_name or 'default'}.rules")
 
 
 def _write_profile_path(path: Path, profile_name: str, pattern: str) -> None:
@@ -640,11 +687,14 @@ def _write_ad_hoc_rule(
     *,
     regex_enabled: bool = False,
 ) -> None:
+    path = _scope_path(path, profile_name)
     document, entries = _read_rule_document(
         path, profile_name, create_profile=profile_name is not None
     )
     entry = tomlkit.inline_table() if isinstance(entries, Array) else tomlkit.table()
     entry.update({"pattern": pattern, "color": color, "regex": regex_enabled, "disabled": False})
+    if profile_name is None:
+        entry["shared"] = True
     entries.insert(0, entry)
     _save_rule_document(path, document)
 
@@ -661,8 +711,8 @@ def _change_rule(
     _, current_rules, _ = _load_settings(rules_path.parent, profile)
     if rule not in current_rules:
         raise ValueError("Rules changed on disk; restart ctail before editing this rule.")
-    path = rules_path.with_name("ctail.toml") if rule.source == "built-in" else Path(rule.source)
     scope = profile if rule.source == "built-in" and rule.source_index is None else rule.profile_name
+    path = _scope_path(rules_path.with_name("ctail.toml"), scope) if rule.source == "built-in" else Path(rule.source)
     document, entries = _read_rule_document(path, scope)
     if rule.source_index is None:
         if rule.source != "built-in":
@@ -695,8 +745,8 @@ def _edit_rule(
         raise ValueError("Built-in patterns cannot be changed.")
     if rule.source == "built-in" and regex_enabled is False:
         raise ValueError("Built-in rules must use regex.")
-    path = rules_path.with_name("ctail.toml") if rule.source == "built-in" else Path(rule.source)
     scope = profile if rule.source == "built-in" and rule.source_index is None else rule.profile_name
+    path = _scope_path(rules_path.with_name("ctail.toml"), scope) if rule.source == "built-in" else Path(rule.source)
     document, entries = _read_rule_document(path, scope)
     if rule.source_index is None:
         if rule.source != "built-in":
@@ -721,8 +771,8 @@ def _move_ad_hoc_rule(
     *,
     profile: str | None = None,
 ) -> bool:
-    if rule.source == "built-in" or Path(rule.source).resolve() != rules_path.resolve():
-        raise ValueError("Only ad-hoc rules from rules.toml can be moved.")
+    if rule.source == "built-in":
+        raise ValueError("Only custom rules can be moved.")
     if rule.source_index is None:
         raise ValueError("Rule has no saved TOML entry.")
     _, current_rules, _ = _load_settings(rules_path.parent, profile)
@@ -733,14 +783,29 @@ def _move_ad_hoc_rule(
     profiles = _parse_rule_profiles(config, config_path, allow_builtins=True)
     if destination is not None and destination not in profiles:
         raise ValueError(f"Profile {destination!r} no longer exists.")
-    if rule.profile_name == destination:
+    if (destination is None and rule.shared) or (
+        destination is not None and rule.profile_name == destination
+    ):
         return False
 
-    document, source = _read_rule_document(rules_path, rule.profile_name)
-    target = _rule_entries(
-        document, rules_path, destination, create_profile=destination is not None
-    )
+    source_path = Path(rule.source)
+    target_path = _scope_path(config_path, destination)
+    document, source = _read_rule_document(source_path, rule.profile_name)
+    if source_path == target_path:
+        target_document = document
+        target = _rule_entries(
+            document, source_path, destination if source_path.suffix != ".rules" else None,
+            create_profile=destination is not None,
+        )
+    else:
+        target_document, target = _read_rule_document(target_path, destination)
+        target_existed = target_path.exists()
+        original_target = tomlkit.parse(tomlkit.dumps(target_document))
     entry = source.pop(rule.source_index)
+    if destination is None:
+        entry["shared"] = True
+    else:
+        entry.pop("shared", None)
     if isinstance(target, AoT) and not isinstance(entry, TOMLTable):
         converted = tomlkit.table()
         converted.update(entry.unwrap())
@@ -750,7 +815,24 @@ def _move_ad_hoc_rule(
         converted.update(entry.unwrap())
         entry = converted
     target.insert(0, entry)
-    _save_rule_document(rules_path, document)
+    if target_document is not document:
+        _save_rule_document(target_path, target_document)
+        try:
+            _save_rule_document(source_path, document)
+        except (OSError, TypeError, ValueError) as error:
+            try:
+                if target_existed:
+                    _save_rule_document(target_path, original_target)
+                else:
+                    target_path.unlink()
+            except (OSError, TypeError, ValueError) as rollback_error:
+                raise OSError(
+                    f"Rule move failed ({error}); destination rollback also failed "
+                    f"({rollback_error}). Check both rules files."
+                ) from rollback_error
+            raise
+    else:
+        _save_rule_document(source_path, document)
     return True
 
 
@@ -941,7 +1023,7 @@ def _render_rule_editor(console: Console, state: _RuleEditorState, profile: str 
         table.add_row(*cells)
     scope = state.scope or "All profiles (shared)"
     if state.rule is not None:
-        scope = state.rule.profile_name or ("shared" if Path(state.rule.source).name == "rules.toml" else "default")
+        scope = state.rule.profile_name or ("shared" if state.rule.shared else "default")
     values = {
         "Bold": ("on" if style.bold else "off") if style is not None else "-",
         "Inverse": ("on" if style.reverse else "off") if style is not None else "-",
@@ -1363,7 +1445,7 @@ def _render_rule_manager(
                 Text(">" if index == selected else " "),
                 Text("disabled" if rule.disabled else "enabled"),
                 Text(source),
-                Text(rule.profile_name or ("shared" if source == "rules.toml" else "-")),
+                Text(rule.profile_name or ("shared" if rule.shared else "-")),
                 Text("regex" if rule.regex_enabled else "literal"),
                 Text(name, no_wrap=False, overflow="fold"),
                 Text(pattern, style=style, no_wrap=False, overflow="fold"),
@@ -1424,15 +1506,23 @@ def _manage_rules(
         if mode == "move":
             table = Table(title="Move ad-hoc rule to", box=None, show_header=False)
             table.add_column("Destination")
-            page_size = max(1, console.size.height - 5)
+            notice = Text(message, style="bold yellow")
+            notice_height = len(console.render_lines(notice, pad=False)) if message else 0
+            page_size = max(1, console.size.height - 5 - notice_height)
             start = (destination_index // page_size) * page_size
             for index in range(start, min(start + page_size, len(destinations))):
                 name = destinations[index] or "All profiles (shared)"
+                if (destinations[index] is None and rules[selected].shared) or (
+                    destinations[index] is not None
+                    and destinations[index] == rules[selected].profile_name
+                ):
+                    name += " (current scope)"
                 row = Text(f"{'> ' if index == destination_index else '  '}{name}")
                 if index == destination_index:
                     row.stylize("reverse")
                 table.add_row(row)
             return Group(
+                *([notice] if message else []),
                 table, Text("Up/Down: select  Enter: choose  Esc: cancel", style="dim"),
                 Text(f"{destination_index + 1}/{len(destinations)}", style="dim"),
             )
@@ -1451,12 +1541,17 @@ def _manage_rules(
             elif mode == "move":
                 if key == "up":
                     destination_index = max(0, destination_index - 1)
+                    message = ""
                 elif key == "down":
                     destination_index = min(len(destinations) - 1, destination_index + 1)
+                    message = ""
                 elif key == "enter":
                     destination = destinations[destination_index]
-                    if destination == rules[selected].profile_name:
-                        mode, message = "list", "Rule is already in that scope."
+                    if (destination is None and rules[selected].shared) or (
+                        destination is not None
+                        and destination == rules[selected].profile_name
+                    ):
+                        message = "Already in this scope; choose another destination."
                     else:
                         label = destination or "all profiles (shared)"
                         mode, message = "confirm_move", f"Move rule to {label}? y: confirm  n: cancel"
@@ -1519,8 +1614,8 @@ def _manage_rules(
                     mode, message = "confirm_delete", "Delete selected rule? y: confirm  n: cancel"
             elif rules and key.lower() == "m":
                 rule = rules[selected]
-                if rule.source == "built-in" or Path(rule.source).resolve() != rules_path.resolve():
-                    message = "Only ad-hoc rules from rules.toml can be moved."
+                if rule.source == "built-in":
+                    message = "Only custom rules can be moved."
                 else:
                     try:
                         config_path = rules_path.with_name("ctail.toml")
@@ -1757,7 +1852,7 @@ def main() -> None:
     parser.add_argument(
         "-p", "--profile",
         metavar="NAME",
-        help="use a named coloring-rule profile from ctail.toml",
+        help="use a named coloring-rule profile",
     )
     parser.add_argument(
         "-l", "--less",

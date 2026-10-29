@@ -50,8 +50,8 @@ class RuleManagementTests(unittest.TestCase):
         self.home = Path(self.directory.name)
         self.config_dir = self.home / ".config" / "ctail"
         self.config_dir.mkdir(parents=True)
-        self.rules_path = self.config_dir / "rules.toml"
         self.config_path = self.config_dir / "ctail.toml"
+        self.rules_path = self.config_path
         self.output = io.StringIO()
         self.console = Console(file=self.output, width=160, height=8, color_system=None)
 
@@ -60,13 +60,11 @@ class RuleManagementTests(unittest.TestCase):
 
     def write_custom_rules(self):
         self.rules_path.write_text(
+            '# main comment\nshow_unmatched = true # keep this\n'
             '# ad-hoc comment\nnote = "keep me"\n\n'
-            '[[rules]]\npattern = "literal"\ncolor = "red"\nregex = false\n'
+            '[[rules]]\npattern = "literal"\ncolor = "red"\nregex = false\nshared = true\n'
             '# disabled comment\ndisabled = true\n\n'
-            '[[rules]]\npattern = "other"\ncolor = "green"\n'
-        )
-        self.config_path.write_text(
-            '# main comment\nshow_unmatched = true # keep this\n\n'
+            '[[rules]]\npattern = "other"\ncolor = "green"\nshared = true\n\n'
             '[[rules]]\npattern = "user"\ncolor = "blue"\n\n'
             '[extra]\nvalue = 42\n'
         )
@@ -187,13 +185,10 @@ class RuleManagementTests(unittest.TestCase):
     def test_profile_rule_can_be_toggled_and_deleted_in_place(self):
         self.config_path.write_text(
             '[[rules]]\npattern = "default"\ncolor = "red"\n\n'
+            '[[rules]]\npattern = "shared-rule"\ncolor = "cyan"\nshared = true\n\n'
             "[profiles.nginx]\n"
             '[[profiles.nginx.rules]]\n'
             'pattern = "main-profile-rule"\ncolor = "yellow"\n'
-        )
-        self.rules_path.write_text(
-            '[[rules]]\npattern = "shared-rule"\ncolor = "cyan"\n\n'
-            "[profiles.nginx]\n"
             '[[profiles.nginx.rules]]\n'
             'pattern = "profile-rule"\ncolor = "green"\n\n'
             '[[profiles.nginx.rules]]\n'
@@ -220,7 +215,7 @@ class RuleManagementTests(unittest.TestCase):
             tomllib.loads(self.rules_path.read_text())["profiles"]["nginx"]["rules"][0][
                 "pattern"
             ],
-            "second-profile-rule",
+            "main-profile-rule",
         )
         self.assertIn("main-profile-rule", [
             rule.pattern for rule in _load_settings(self.config_dir, "nginx")[1]
@@ -273,7 +268,7 @@ class RuleManagementTests(unittest.TestCase):
         _change_rule(disabled, self.rules_path, delete=False)
         self.assertFalse(self.load_rules()[0].disabled)
         self.assertIsNotNone(_render_line("[ERROR] failure", self.load_rules(), False))
-        entries = tomllib.loads(self.config_path.read_text())["rules"]
+        entries = tomllib.loads((self.config_dir / "default.rules").read_text())["rules"]
         self.assertEqual(len(entries), 1)
         self.assertTrue(entries[0]["builtin"])
         self.assertFalse(entries[0]["disabled"])
@@ -318,12 +313,6 @@ class RuleManagementTests(unittest.TestCase):
                 self.config_path.write_text(contents)
                 with self.assertRaises(exception):
                     self.load_rules()
-        self.config_path.unlink()
-        self.rules_path.write_text(
-            f"[[rules]]\nbuiltin = true\npattern = '{DEFAULT_RULES[0][0]}'\n"
-        )
-        with self.assertRaisesRegex(ValueError, "in ctail.toml"):
-            self.load_rules()
 
     def test_builtin_deletion_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "cannot be deleted"):
@@ -350,7 +339,7 @@ class RuleManagementTests(unittest.TestCase):
         self.assertEqual(self.rules_path.read_bytes(), data)
         self.assertIn("write denied", self.output.getvalue())
         self.assertEqual(sorted(path.name for path in self.config_dir.iterdir()),
-                         ["ctail.toml", "rules.toml"])
+                         ["ctail.toml"])
 
     def test_management_updates_live_rules_only_after_successful_save(self):
         self.write_custom_rules()
@@ -403,7 +392,7 @@ class RuleManagementTests(unittest.TestCase):
             rules, list(r"error\d+") + ["down"] * 5 + ["enter", "down", "enter"]
         )
         self.assertEqual(message, "Added rule.")
-        self.assertTrue(tomllib.loads(self.rules_path.read_text())["rules"][0]["regex"])
+        self.assertTrue(tomllib.loads((self.config_dir / "default.rules").read_text())["rules"][0]["regex"])
         self.assertTrue(rules[0].regex_enabled)
         self.assertIsNotNone(_render_line("error123", [rules[0]], False))
         self.assertIsNone(_render_line(r"error\d+", [rules[0]], False))
@@ -619,7 +608,9 @@ class RuleManagementTests(unittest.TestCase):
                 rules, ["enter", "x", "enter"] + ["down"] * 6 + ["enter"]
             )
         self.assertIn("saved but could not reload: reload failed", message)
-        self.assertEqual(tomllib.loads(self.rules_path.read_text())["rules"][0]["pattern"], "x")
+        self.assertEqual(
+            tomllib.loads((self.config_dir / "default.rules").read_text())["rules"][0]["pattern"], "x"
+        )
         self.assertNotIn("x", [rule.pattern for rule in rules])
 
     def test_editor_text_edit_cursor_and_cancellation(self):
@@ -668,7 +659,9 @@ class RuleManagementTests(unittest.TestCase):
         self.assertIsNone(style.bold)
         self.assertIsNone(style.reverse)
         self.assertEqual(rules[0].color, "yellow")
-        self.assertEqual(tomllib.loads(self.rules_path.read_text())["rules"][0]["color"], "yellow")
+        self.assertEqual(
+            tomllib.loads((self.config_dir / "default.rules").read_text())["rules"][0]["color"], "yellow"
+        )
 
     def test_editor_toggling_off_only_unsets_selected_attribute(self):
         for field, initial, expected in (
@@ -792,7 +785,7 @@ class RuleManagementTests(unittest.TestCase):
             "one",
         )
         self.assertEqual(message, "Canceled.")
-        self.assertFalse(self.rules_path.exists())
+        self.assertEqual(self.config_path.read_text(), "[profiles.one]\n")
         frames = [call.args[0] for call in live.update.call_args_list]
         controls = [
             " ".join(
@@ -937,12 +930,12 @@ class RuleManagementTests(unittest.TestCase):
         self.assertIn("# keep", self.rules_path.read_text())
 
     def test_move_ad_hoc_rule_between_scopes_preserves_fields_and_duplicates(self):
-        self.config_path.write_text("[profiles.one]\n[profiles.two]\n")
         self.rules_path.write_text(
             '# retained\n[[rules]]\nname = "first"\npattern = "same"\n'
-            'color = "red"\nregex = false\n\n'
+            'color = "red"\nregex = false\nshared = true\n\n'
             '[[rules]]\nname = "second"\npattern = "same"\n'
-            'color = "blue"\nregex = true\ndisabled = true\nextra = "keep"\n'
+            'color = "blue"\nregex = true\ndisabled = true\nextra = "keep"\nshared = true\n'
+            '[profiles.one]\n[profiles.two]\n'
         )
         self.rules_path.chmod(0o640)
         rule = _load_settings(self.config_dir, "one")[1][1]
@@ -971,9 +964,8 @@ class RuleManagementTests(unittest.TestCase):
             ])
 
     def test_move_supports_inline_and_array_of_tables(self):
-        self.config_path.write_text("[profiles.one]\n")
         self.rules_path.write_text(
-            'rules = [{pattern="x", color="red"}] # shared\n'
+            'rules = [{pattern="x", color="red", shared=true}] # shared\n'
             '[profiles.one]\n[[profiles.one.rules]]\npattern="y"\ncolor="blue"\n'
         )
         rules = _load_settings(self.config_dir, "one")[1]
@@ -986,8 +978,7 @@ class RuleManagementTests(unittest.TestCase):
         self.assertIn("# shared", self.rules_path.read_text())
 
     def test_move_rejects_stale_invalid_and_failed_writes(self):
-        self.config_path.write_text("[profiles.one]\n")
-        self.rules_path.write_text('[[rules]]\npattern="x"\ncolor="red"\n')
+        self.rules_path.write_text('[[rules]]\npattern="x"\ncolor="red"\n[profiles.one]\n')
         rule = self.load_rules()[0]
         with self.assertRaisesRegex(ValueError, "no longer exists"):
             _move_ad_hoc_rule(rule, self.rules_path, "missing")
@@ -1018,8 +1009,10 @@ class RuleManagementTests(unittest.TestCase):
         self.assertEqual(self.rules_path.read_bytes(), before_file)
 
     def test_manager_move_defaults_to_active_profile_and_refreshes(self):
-        self.config_path.write_text("[profiles.one]\n[profiles.two]\n")
-        self.rules_path.write_text('[[rules]]\npattern="x"\ncolor="red"\n')
+        self.rules_path.write_text(
+            '[[rules]]\npattern="x"\ncolor="red"\nshared=true\n'
+            '[profiles.one]\n[profiles.two]\n'
+        )
         rules = _load_settings(self.config_dir, "one")[1]
         self.run_manager(rules, ["m", "enter", "y", "cancel"], profile="one")
         self.assertEqual(rules[0].profile_name, "one")
@@ -1027,6 +1020,34 @@ class RuleManagementTests(unittest.TestCase):
         self.run_manager(rules, ["m", "down", "enter", "y", "cancel"], profile="one")
         self.assertNotIn("x", [rule.pattern for rule in rules])
         self.assertIn("x", [rule.pattern for rule in _load_settings(self.config_dir, "two")[1]])
+
+    def test_manager_same_scope_move_stays_in_selector_and_preserves_rule(self):
+        self.config_path.write_text("[profiles.one]\n")
+        for profile, document, scope in (
+            (None, '[[rules]]\npattern="x"\ncolor="red"\nshared=true\n', "All profiles (shared)"),
+            ("one", '[[profiles.one.rules]]\npattern="x"\ncolor="red"\n', "one"),
+        ):
+            with self.subTest(profile=profile):
+                self.output.seek(0)
+                self.output.truncate()
+                self.rules_path.write_text(document)
+                rules = _load_settings(self.config_dir, profile)[1]
+                before_rules = list(rules)
+                before_file = self.rules_path.read_bytes()
+                self.run_manager(rules, ["m", "enter", "cancel", "cancel"], profile=profile)
+                output = self.output.getvalue()
+                self.assertIn(f"{scope} (current scope)", output)
+                self.assertIn("Already in this scope; choose another destination.", output)
+                self.assertEqual(rules, before_rules)
+                self.assertEqual(self.rules_path.read_bytes(), before_file)
+
+    def test_manager_can_choose_another_scope_after_same_scope(self):
+        self.config_path.write_text("[profiles.one]\n")
+        self.rules_path.write_text('[[profiles.one.rules]]\npattern="x"\ncolor="red"\n')
+        rules = _load_settings(self.config_dir, "one")[1]
+        self.run_manager(rules, ["m", "enter", "up", "enter", "y", "cancel"], profile="one")
+        self.assertIsNone(rules[0].profile_name)
+        self.assertIn("Moved rule.", self.output.getvalue())
 
     def test_manager_builtin_override_uses_active_profile(self):
         self.config_path.write_text("[profiles.one]\n")
@@ -1049,7 +1070,7 @@ class RuleManagementTests(unittest.TestCase):
         first = next(line for line in lines if "Alpha" in line)
         second = next(line for line in lines if "Beta" in line)
         for first_value, second_value in (
-            ("enabled", "enabled"), ("rules.toml", "rules.toml"), ("shared", "shared"),
+            ("enabled", "enabled"), ("ctail.toml", "ctail.toml"), ("-", "-"),
             ("literal", "regex"), ("Alpha", "Beta"), ("'short'", "'longer'"),
             ("red", "blue"),
         ):
@@ -1059,7 +1080,7 @@ class RuleManagementTests(unittest.TestCase):
         small_console.print(_render_rule_manager(small_console, self.load_rules(), 0, ""))
         self.assertTrue(all(len(line) <= 70 for line in narrow.getvalue().splitlines()))
         self.assertIn("enabled", narrow.getvalue())
-        self.assertIn("rules.toml", narrow.getvalue())
+        self.assertIn("ctail.toml", narrow.getvalue())
         self.assertIn("literal", narrow.getvalue())
 
     def test_manager_pattern_column_fits_rendered_content_plus_one(self):
@@ -1100,7 +1121,7 @@ class RuleManagementTests(unittest.TestCase):
         self.assertGreaterEqual(style_start - pattern_start - 1, 20)
         rows = []
         for line in lines[lines.index(header) + 1:]:
-            if "rules.toml" in line:
+            if "ctail.toml" in line:
                 rows.append(["", ""])
             elif "built-in" in line:
                 break
@@ -1230,7 +1251,7 @@ class RuleManagementTests(unittest.TestCase):
         rules = self.load_rules()
         self.run_manager(rules, ["x", "m", "cancel"])
         self.assertIn("cannot be deleted", self.output.getvalue())
-        self.assertIn("Only ad-hoc rules", self.output.getvalue())
+        self.assertIn("Only custom rules", self.output.getvalue())
         self.assertEqual(rules, self.load_rules())
 
     def test_escape_cancels_without_writing_or_changing_live_rules(self):
@@ -1400,8 +1421,10 @@ class RuleManagementTests(unittest.TestCase):
             self.read_until(master_fd, b"\x1b[?1049l")
 
     def test_pty_move_between_active_and_shared_scopes(self):
-        self.config_path.write_text('active_profile = "one"\n[profiles.one]\n')
-        self.rules_path.write_text('[[rules]]\npattern="x"\ncolor="red"\nregex=false\n')
+        self.rules_path.write_text(
+            'active_profile = "one"\n[[rules]]\npattern="x"\ncolor="red"\n'
+            'regex=false\nshared=true\n[profiles.one]\n'
+        )
         with self.running_app() as (master_fd, _):
             os.write(master_fd, b"r")
             self.read_until(master_fd, b"Rules manager")
@@ -1414,7 +1437,11 @@ class RuleManagementTests(unittest.TestCase):
             data = tomllib.loads(self.rules_path.read_text())
             self.assertEqual(data["profiles"]["one"]["rules"][0]["pattern"], "x")
             os.write(master_fd, b"m")
-            self.read_until(master_fd, b"Move ad-hoc rule to")
+            self.read_until(master_fd, b"one (current scope)")
+            before = self.rules_path.read_bytes()
+            os.write(master_fd, b"\r")
+            self.read_until(master_fd, b"Already in this scope; choose another destination.")
+            self.assertEqual(self.rules_path.read_bytes(), before)
             os.write(master_fd, b"\x1b[A\r")
             self.read_until(master_fd, b"Move rule to all profiles")
             os.write(master_fd, b"y")
@@ -1492,7 +1519,7 @@ class RuleManagementTests(unittest.TestCase):
             self.read_until(master_fd, b"Add rule")
             os.write(master_fd, b"manager[0-9]+" + b"\x1b[B" * 5 + b"\r\x1b[B\r")
             self.read_until(master_fd, b"Added rule.")
-            entries = tomllib.loads(self.rules_path.read_text())["rules"]
+            entries = tomllib.loads((self.config_dir / "default.rules").read_text())["rules"]
             self.assertEqual(
                 [(entry["pattern"], entry["regex"]) for entry in entries[:2]],
                 [("manager[0-9]+", True), ("tail[0-9]+", True)],

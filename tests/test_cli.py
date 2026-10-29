@@ -56,11 +56,9 @@ class ListingTests(unittest.TestCase):
         return output.getvalue()
 
     def write_rules(self):
-        (self.config_dir / "rules.toml").write_text(
-            '[[rules]]\npattern = "[literal]"\n'
-            'color = "bold white on red"\nregex = false\n'
-        )
         (self.config_dir / "ctail.toml").write_text(
+            '[[rules]]\npattern = "[literal]"\n'
+            'color = "bold white on red"\nregex = false\nshared = true\n'
             '[[rules]]\npattern = "user.*pattern"\ncolor = "orange3"\n'
         )
 
@@ -101,7 +99,7 @@ class ListingTests(unittest.TestCase):
                 output = self.invoke(option, "--no-color")
                 self.assertNotIn("\x1b[", output)
                 for value in (
-                    "rules.toml", "ctail.toml", "built-in", "literal", "regex",
+                    "ctail.toml", "built-in", "literal", "regex",
                     "bold white on red", "orange3",
                 ):
                     self.assertIn(value, output)
@@ -150,19 +148,17 @@ class ListingTests(unittest.TestCase):
     def test_profile_rules_replace_main_rules_and_keep_global_rules(self):
         (self.config_dir / "ctail.toml").write_text(
             '[[rules]]\npattern = "default-only"\ncolor = "red"\n\n'
-            '[profiles.nginx]\n'
-            '[[profiles.nginx.rules]]\n'
-            'name = "Nginx request method"\n'
-            'pattern = "nginx-only"\n'
-            'color = "green"\n'
-        )
-        (self.config_dir / "rules.toml").write_text(
-            '[[rules]]\npattern = "shared-literal"\ncolor = "blue"\nregex = false\n\n'
+            '[[rules]]\npattern = "shared-literal"\ncolor = "blue"\n'
+            'regex = false\nshared = true\n\n'
             '[profiles.nginx]\n'
             '[[profiles.nginx.rules]]\n'
             'name = "Nginx request identifier"\n'
             'pattern = "nginx-request-id"\n'
             'color = "yellow"\n'
+            '[[profiles.nginx.rules]]\n'
+            'name = "Nginx request method"\n'
+            'pattern = "nginx-only"\n'
+            'color = "green"\n'
         )
 
         _, default_rules, _ = _load_settings(self.config_dir)
@@ -191,15 +187,13 @@ class ListingTests(unittest.TestCase):
     def test_profile_option_shows_only_selected_profile_rules(self):
         (self.config_dir / "ctail.toml").write_text(
             '[[rules]]\npattern = "default-only"\ncolor = "red"\n\n'
+            '[[rules]]\npattern = "shared-only"\ncolor = "blue"\n'
+            'regex = false\nshared = true\n\n'
             "[profiles.nginx]\n"
             '[[profiles.nginx.rules]]\n'
             'name = "Nginx access"\n'
             'pattern = "nginx-only"\n'
             'color = "green"\n'
-        )
-        (self.config_dir / "rules.toml").write_text(
-            '[[rules]]\npattern = "shared-only"\ncolor = "blue"\nregex = false\n\n'
-            "[profiles.nginx]\n"
             '[[profiles.nginx.rules]]\n'
             'name = "Nginx temporary rule"\n'
             'pattern = "nginx-temporary-only"\n'
@@ -369,7 +363,7 @@ class ListingTests(unittest.TestCase):
         self.assertIn("alpha (active)", output.getvalue())
 
     def test_escape_from_profile_selector_is_silent(self):
-        rules_path = self.config_dir / "rules.toml"
+        rules_path = self.config_dir / "ctail.toml"
         rules_path.write_text("")
         output = io.StringIO()
         console = Console(file=output, no_color=True)
@@ -384,7 +378,7 @@ class ListingTests(unittest.TestCase):
         self.assertNotIn("Canceled", output.getvalue())
 
     def test_add_profile_key_saves_and_activates_new_profile(self):
-        rules_path = self.config_dir / "rules.toml"
+        rules_path = self.config_dir / "ctail.toml"
         rules_path.write_text("")
         console = Console(file=io.StringIO(), no_color=True)
         terminal_state = [0, 0, 0, 0, 0, 0, [0] * 8]
@@ -403,7 +397,7 @@ class ListingTests(unittest.TestCase):
 
         self.assertEqual(selected, "new-profile")
         config_text = (self.config_dir / "ctail.toml").read_text()
-        self.assertIn("[profiles.new-profile]", config_text)
+        self.assertTrue((self.config_dir / "new-profile.rules").is_file())
         self.assertIn('active_profile = "new-profile"', config_text)
         self.assertEqual([rule.pattern for rule in rules], [
             pattern for pattern, _ in DEFAULT_RULES
@@ -412,8 +406,7 @@ class ListingTests(unittest.TestCase):
     def test_selecting_profile_persists_it_and_default_clears_it(self):
         config_path = self.config_dir / "ctail.toml"
         config_path.write_text("[profiles.nginx]\n")
-        rules_path = self.config_dir / "rules.toml"
-        rules_path.write_text("")
+        rules_path = config_path
         console = Console(file=io.StringIO(), no_color=True)
         terminal_state = [0, 0, 0, 0, 0, 0, [0] * 8]
         rules = []
@@ -440,11 +433,11 @@ class ListingTests(unittest.TestCase):
         main_config_path = self.config_dir / "ctail.toml"
         rules_config_path = self.config_dir / "rules.toml"
         self.assertTrue(main_config_path.is_file())
-        self.assertTrue(rules_config_path.is_file())
+        self.assertFalse(rules_config_path.exists())
         self.assertIn("show_unmatched = true", main_config_path.read_text())
-        self.assertIn("[profiles.http-access]", main_config_path.read_text())
+        self.assertTrue((self.config_dir / "http-access.rules").is_file())
         self.assertIn("Syslog timestamp", output)
-        self.assertIn("Log analysis GET requests", rules_config_path.read_text())
+        self.assertIn("Request ID field", (self.config_dir / "default.rules").read_text())
 
     def test_first_run_preserves_existing_configuration(self):
         original = 'show_unmatched = false\n\n[[rules]]\npattern = "custom"\ncolor = "red"\n'
@@ -464,10 +457,7 @@ class ListingTests(unittest.TestCase):
         self.invoke("--show-rules", "--no-color")
 
         self.assertEqual((self.config_dir / "ctail.toml").read_text(), original)
-        self.assertIn(
-            "Log analysis GET requests",
-            (self.config_dir / "rules.toml").read_text(),
-        )
+        self.assertFalse((self.config_dir / "rules.toml").exists())
 
     def test_literal_and_background_rendering_preserved(self):
         self.write_rules()
@@ -603,7 +593,7 @@ class ListingTests(unittest.TestCase):
                 [],
                 False,
                 keyboard_fd=11,
-                rules_path=self.config_dir / "rules.toml",
+                rules_path=self.config_dir / "ctail.toml",
                 original_terminal=terminal_state,
             )
 

@@ -9,8 +9,7 @@
 
 ## Configuration
 
-- User configuration lives in `~/.config/ctail/ctail.toml`; ad-hoc literal
-  rules live separately in `~/.config/ctail/rules.toml`.
+- User configuration and all coloring rules live in `~/.config/ctail/ctail.toml`.
 - Use TOML `[[rules]]` entries for individual coloring rules. See the examples
   and manual testing steps in [README.md](README.md).
 - Do not overwrite or modify a user's existing files in `~/.config/ctail/`

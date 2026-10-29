@@ -34,8 +34,7 @@ class ProfilePathTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
         self.config_path = self.root / "ctail.toml"
-        self.rules_path = self.root / "rules.toml"
-        self.rules_path.write_text("")
+        self.rules_path = self.config_path
 
     def parse(self, entries):
         data = {"profiles": {"one": {}, "two": {}}, "profile_paths": entries}
@@ -339,7 +338,6 @@ class ProfilePathPtyTests(unittest.TestCase):
                 '[profiles.logs]\n[[profiles.logs.rules]]\npattern = "ONE"\ncolor = "red"\n'
                 '[profiles.other]\n[[profiles.other.rules]]\npattern = "TWO"\ncolor = "blue"\n'
             )
-            (config_dir / "rules.toml").write_text("")
             command = [sys.executable, "-c", "from ctail.cli import main; main()", "--less"]
             env = dict(os.environ, HOME=home, TERM="xterm-256color")
             file_result = subprocess.run(
@@ -369,8 +367,6 @@ class ProfilePathPtyTests(unittest.TestCase):
                 f'[[profile_paths]]\nprofile = "logs"\npaths = ["{log}"]\n'
                 "[profiles.logs]\n[profiles.other]\n"
             )
-            rules_path = config_dir / "rules.toml"
-            rules_path.write_text("")
             master, slave = pty.openpty()
             process = subprocess.Popen(
                 [sys.executable, "-c", "from ctail.cli import main; main()", "-f", str(log)],
@@ -407,7 +403,7 @@ class ProfilePathPtyTests(unittest.TestCase):
                 os.close(master)
                 os.close(slave)
             self.assertEqual(tomllib.loads(config_path.read_text())["active_profile"], "other")
-            rules = tomllib.loads(rules_path.read_text())
+            rules = tomllib.loads(config_path.read_text())
             self.assertEqual(rules["profiles"]["logs"]["rules"][0]["pattern"], "scoped-rule")
 
     def test_association_is_confirmed_and_used_on_next_start(self):
@@ -417,7 +413,6 @@ class ProfilePathPtyTests(unittest.TestCase):
             config_dir.mkdir(parents=True)
             config_path = config_dir / "ctail.toml"
             config_path.write_text('active_profile = "other"\n[profiles.logs]\n[profiles.other]\n')
-            (config_dir / "rules.toml").write_text("")
             log = root / "file.log"
             log.touch()
             master, slave = pty.openpty()
