@@ -1,3 +1,5 @@
+"""Command-line entry point for coloring, tailing, and paging through logs."""
+
 from __future__ import annotations
 
 import argparse
@@ -32,6 +34,8 @@ from tomlkit.toml_document import TOMLDocument
 
 @dataclass(frozen=True)
 class ColorRule:
+    """A compiled coloring rule and its configuration metadata."""
+
     pattern: str
     color: str
     regex: re.Pattern[str]
@@ -54,10 +58,12 @@ DEFAULT_RULES = (
 
 
 def _config_directory() -> Path:
+    """Return the directory containing the user's ctail configuration."""
     return Path.home() / ".config" / "ctail"
 
 
 def _example_config_directory() -> Path:
+    """Locate the packaged or source-tree directory of example configurations."""
     installed_config_dir = Path(__file__).resolve().parent
     filenames = ("ctail.toml",)
     if all((installed_config_dir / name).is_file() for name in filenames):
@@ -71,6 +77,7 @@ def _example_config_directory() -> Path:
 
 
 def _initialize_config(config_dir: Path) -> None:
+    """Create missing example configuration files without replacing existing files."""
     config_dir.mkdir(parents=True, exist_ok=True)
 
     example_dir = _example_config_directory()
@@ -90,6 +97,7 @@ def _initialize_config(config_dir: Path) -> None:
 
 
 def _split_colors(value: str) -> tuple[str, ...]:
+    """Split comma-separated styles while preserving commas inside parentheses."""
     colors: list[str] = []
     start = 0
     parentheses = 0
@@ -112,6 +120,7 @@ def _parse_rules(
     allow_builtins: bool = False,
     profile_name: str | None = None,
 ) -> list[ColorRule]:
+    """Validate and compile rule tables from a TOML configuration source."""
     if not isinstance(data, list):
         raise TypeError(f"{source}: 'rules' must be an array of tables")
 
@@ -194,6 +203,7 @@ def _parse_rule_profiles(
     *,
     allow_builtins: bool = False,
 ) -> dict[str, list[ColorRule]]:
+    """Load named profiles from the main configuration and rule files."""
     profiles = data.get("profiles", {})
     if not isinstance(profiles, dict):
         raise TypeError(f"{source}: 'profiles' must be a table")
@@ -227,6 +237,8 @@ def _parse_rule_profiles(
 
 @dataclass(frozen=True)
 class ProfilePath:
+    """A file or directory pattern associated with a coloring-rule profile."""
+
     profile: str
     pattern: str
     directory: bool
@@ -235,6 +247,7 @@ class ProfilePath:
 def _parse_profile_paths(
     data: dict[str, Any], source: Path, profiles: dict[str, list[ColorRule]]
 ) -> list[ProfilePath]:
+    """Validate and normalize configured profile-to-path associations."""
     entries = data.get("profile_paths", [])
     if not isinstance(entries, list):
         raise TypeError(f"{source}: 'profile_paths' must be an array of tables")
@@ -268,6 +281,7 @@ def _parse_profile_paths(
 
 
 def _matching_profile(filename: str, mappings: list[ProfilePath]) -> str | None:
+    """Return the first profile whose path mapping matches the given file."""
     path = Path(os.path.abspath(filename))
     for mapping in mappings:
         candidate = path.parent if mapping.directory else path
@@ -277,6 +291,7 @@ def _matching_profile(filename: str, mappings: list[ProfilePath]) -> str | None:
 
 
 def _single_file_argument(arguments: list[str], *, less: bool = False) -> str | None:
+    """Return the sole file argument when CLI arguments identify exactly one file."""
     if less:
         files = arguments[1:] if arguments[:1] == ["--"] else arguments
         return files[0] if len(files) == 1 and not files[0].startswith("-") else None
@@ -315,6 +330,7 @@ def _single_file_argument(arguments: list[str], *, less: bool = False) -> str | 
 
 
 def _read_toml(path: Path) -> dict[str, Any]:
+    """Read a TOML file and raise a path-qualified error for invalid documents."""
     try:
         with path.open("rb") as config_file:
             data = tomllib.load(config_file)
@@ -326,6 +342,7 @@ def _read_toml(path: Path) -> dict[str, Any]:
 
 
 def _configured_active_profile(data: dict[str, Any], source: Path) -> str | None:
+    """Validate and return the configured active profile name, if any."""
     profile = data.get("active_profile")
     if profile is not None and (not isinstance(profile, str) or not profile):
         raise TypeError(f"{source}: 'active_profile' must be a non-empty string")
@@ -333,6 +350,7 @@ def _configured_active_profile(data: dict[str, Any], source: Path) -> str | None
 
 
 def _read_active_profile(config_path: Path) -> str | None:
+    """Read the active profile from a configuration file when it exists."""
     if not config_path.exists():
         return None
     config = _read_toml(config_path)
@@ -342,6 +360,7 @@ def _read_active_profile(config_path: Path) -> str | None:
 def _load_settings(
     config_dir: Path, profile: str | None = None
 ) -> tuple[bool, list[ColorRule], Path]:
+    """Load display settings and combine shared, selected, and built-in rules."""
     config_path = config_dir / "ctail.toml"
     show_unmatched = False
     configured_rules: list[ColorRule] = []
@@ -399,6 +418,7 @@ def _load_settings(
 
 
 def _list_profiles(console: Console, config_path: Path) -> None:
+    """Print configured profile names and mark the active profile."""
     config = _read_toml(config_path) if config_path.exists() else {}
     profiles = _parse_rule_profiles(config, config_path, allow_builtins=True)
     active_profile = _configured_active_profile(config, config_path)
@@ -412,6 +432,7 @@ def _list_profiles(console: Console, config_path: Path) -> None:
 
 
 def _list_colors(console: Console) -> None:
+    """Print supported named colors and example style syntax."""
     console.print("Named colors (foreground or background):")
     for name in sorted({"default", *ANSI_COLOR_NAMES}):
         console.print(Text(name, style=name))
@@ -424,6 +445,7 @@ def _list_colors(console: Console) -> None:
 def _show_rules(
     console: Console, rules: list[ColorRule], profile: str | None = None
 ) -> None:
+    """Display coloring rules in priority order, optionally for one profile."""
     if profile is not None:
         rules = [rule for rule in rules if rule.profile_name == profile]
     title = (
@@ -450,6 +472,7 @@ def _show_rules(
 
 
 def _render_line(line: str, rules: list[ColorRule], show_unmatched: bool) -> Text | None:
+    """Apply the highest-priority matching rules and return styled Rich text."""
     matches: list[tuple[int, int, ColorRule, re.Match[str]]] = []
     cursor = 0
     while cursor < len(line):
@@ -504,6 +527,7 @@ def _read_rule_document(
     *,
     create_profile: bool = False,
 ) -> tuple[TOMLDocument, AoT | Array]:
+    """Parse a rule document and return its editable rules array."""
     if path.exists():
         try:
             document = tomlkit.parse(path.read_text(encoding="utf-8"))
@@ -533,6 +557,7 @@ def _rule_entries(
     *,
     create_profile: bool = False,
 ) -> AoT | Array:
+    """Return or create the rules array for the requested profile scope."""
     if profile_name is None:
         if "rules" not in document:
             document["rules"] = tomlkit.aot()
@@ -557,6 +582,7 @@ def _rule_entries(
 
 
 def _save_rule_document(path: Path, document: TOMLDocument) -> None:
+    """Validate and atomically save a rule document while preserving its mode."""
     is_rule_file = _is_rule_file(path)
     _parse_rules(
         document.unwrap().get("rules", []), path,
@@ -600,6 +626,7 @@ def _save_rule_document(path: Path, document: TOMLDocument) -> None:
 
 
 def _write_active_profile(path: Path, profile_name: str | None) -> None:
+    """Set or clear the persisted active profile in the main configuration."""
     if path.exists():
         try:
             document = tomlkit.parse(path.read_text(encoding="utf-8"))
@@ -617,6 +644,7 @@ def _write_active_profile(path: Path, profile_name: str | None) -> None:
 
 
 def _write_profile(path: Path, profile_name: str) -> None:
+    """Create a named profile in the main configuration or a separate rule file."""
     if (not profile_name or profile_name in {".", "..", "default"}
             or "/" in profile_name or "\\" in profile_name or "\0" in profile_name):
         raise ValueError("invalid or reserved profile name")
@@ -647,6 +675,7 @@ def _write_profile(path: Path, profile_name: str) -> None:
 
 
 def _uses_rule_files(config_path: Path) -> bool:
+    """Determine whether profiles are stored in separate rules files."""
     if any(config_path.parent.glob("*.rules.toml")):
         return True
     data = _read_toml(config_path) if config_path.exists() else {}
@@ -654,6 +683,7 @@ def _uses_rule_files(config_path: Path) -> bool:
 
 
 def _scope_path(config_path: Path, profile_name: str | None) -> Path:
+    """Choose the configuration file that stores rules for the given scope."""
     config = _read_toml(config_path) if config_path.exists() else {}
     if profile_name is None and "rules" in config:
         return config_path
@@ -665,14 +695,17 @@ def _scope_path(config_path: Path, profile_name: str | None) -> Path:
 
 
 def _is_rule_file(path: Path) -> bool:
+    """Return whether a path uses the separate ``*.rules.toml`` format."""
     return path.name.endswith(".rules.toml")
 
 
 def _rule_profile_name(path: Path) -> str:
+    """Derive a profile name from a separate rule file's filename."""
     return path.name.removesuffix(".rules.toml")
 
 
 def _write_profile_path(path: Path, profile_name: str, pattern: str) -> None:
+    """Add a file or directory pattern association for a profile."""
     try:
         document = tomlkit.parse(path.read_text(encoding="utf-8"))
     except ParseError as error:
@@ -700,6 +733,7 @@ def _write_ad_hoc_rule(
     regex_enabled: bool = False,
     shared: bool = True,
 ) -> None:
+    """Insert a custom rule at the start of its configuration scope."""
     path = _scope_path(path, profile_name)
     document, entries = _read_rule_document(
         path, profile_name, create_profile=profile_name is not None
@@ -719,6 +753,7 @@ def _change_rule(
     delete: bool,
     profile: str | None = None,
 ) -> None:
+    """Toggle a rule's enabled state or delete a saved custom rule."""
     if delete and rule.source == "built-in":
         raise ValueError("Built-in rules cannot be deleted; disable them instead.")
     _, current_rules, _ = _load_settings(rules_path.parent, profile)
@@ -751,6 +786,7 @@ def _edit_rule(
     profile: str | None = None,
     regex_enabled: bool | None = None,
 ) -> None:
+    """Update a rule's pattern, color, or matching mode in its source file."""
     _, current_rules, _ = _load_settings(rules_path.parent, profile)
     if rule not in current_rules:
         raise ValueError("Rules changed on disk; restart ctail before editing this rule.")
@@ -784,6 +820,7 @@ def _rename_rule(
     *,
     profile: str | None = None,
 ) -> None:
+    """Set a rule's display name in its source configuration."""
     if not name.strip():
         raise ValueError("Rule name must not be empty.")
     _, current_rules, _ = _load_settings(rules_path.parent, profile)
@@ -810,6 +847,7 @@ def _copy_ad_hoc_rule(
     *,
     profile: str | None = None,
 ) -> bool:
+    """Copy a custom rule to another profile, returning whether it was added."""
     if rule.source == "built-in":
         raise ValueError("Only custom rules can be copied.")
     if rule.source_index is None:
@@ -859,6 +897,7 @@ def _add_rule(
     original_terminal: list[Any],
     profile: str | None = None,
 ) -> None:
+    """Open the interactive editor for adding a coloring rule."""
     del original_terminal
     with Live(
         console=console, screen=True, transient=True, auto_refresh=False,
@@ -869,6 +908,7 @@ def _add_rule(
 
 
 def _read_rule_key(keyboard_fd: int) -> str:
+    """Read and normalize one key, including common terminal escape sequences."""
     key = os.read(keyboard_fd, 1)
     if key == b"\x1b":
         sequence = bytearray()
@@ -917,6 +957,8 @@ _REGEX_METACHARACTERS = frozenset(r".^$*+?{}[]\|()")
 
 @dataclass
 class _RuleEditorState:
+    """Mutable values and interaction state for the rule editor."""
+
     pattern: str
     color: str
     scope: str | None
@@ -930,6 +972,7 @@ class _RuleEditorState:
 
 
 def _editor_style(color: str) -> Style | None:
+    """Parse a single simple style, returning ``None`` for unsupported styles."""
     if len(_split_colors(color)) != 1:
         return None
     try:
@@ -941,6 +984,7 @@ def _editor_style(color: str) -> Style | None:
 
 
 def _editor_color_choices(color: str | None) -> list[str]:
+    """Return selectable colors, retaining a custom current color if necessary."""
     choices = list(_RULE_EDITOR_COLORS)
     if color is not None and color not in choices:
         choices.insert(1, color)
@@ -948,6 +992,7 @@ def _editor_color_choices(color: str | None) -> list[str]:
 
 
 def _editor_change_style(state: _RuleEditorState, field: str, step: int) -> None:
+    """Move a style component through its available values."""
     style = _editor_style(state.color)
     if style is None:
         state.message = "Complex style: color controls are unavailable."
@@ -972,6 +1017,7 @@ def _editor_change_style(state: _RuleEditorState, field: str, step: int) -> None
 
 
 def _editor_text_window(text: str, cursor: int, width: int) -> str:
+    """Format a cursor-centered text slice that fits within the editor width."""
     value = text[:cursor] + "|" + text[cursor:]
     start = 0
     while cell_len(value[start:cursor + 1]) > max(1, width - 2):
@@ -983,6 +1029,7 @@ def _editor_text_window(text: str, cursor: int, width: int) -> str:
 
 
 def _render_editor_table(console: Console, state: _RuleEditorState, *, rows: int = 5) -> Table:
+    """Build the table showing the pattern and selectable foreground/background."""
     field = _RULE_EDITOR_FIELDS[state.field]
     style = _editor_style(state.color)
     foreground = style.color.name if style and style.color else "none"
@@ -1047,11 +1094,13 @@ def _fit_editor_view(
     controls: list[Text], mode: Text, style: Text, preview: Text,
     instructions: tuple[str, ...], message: str,
 ) -> Group:
+    """Fit the rule editor contents to the available terminal height."""
     rows = 5
     show_table = True
     help_lines = list(instructions)
 
     def render() -> Group:
+        """Build the current editor view from its visible components."""
         table = _render_editor_table(console, state, rows=rows)
         return Group(
             *([table] if show_table else []), *controls, mode, style, preview, Text(""),
@@ -1060,6 +1109,7 @@ def _fit_editor_view(
         )
 
     def fits(view: Group) -> bool:
+        """Report whether a rendered view fits in the terminal."""
         return len(console.render_lines(view, options=console.options, pad=False)) <= console.size.height
 
     view = render()
@@ -1076,6 +1126,7 @@ def _fit_editor_view(
 
 
 def _render_rule_editor(console: Console, state: _RuleEditorState) -> Group:
+    """Render the editor controls, style preview, and keyboard instructions."""
     field = _RULE_EDITOR_FIELDS[state.field]
     compact = console.size.height < 12
     mode = Text(">" if field == "Mode" else " ", style="bold")
@@ -1112,12 +1163,14 @@ def _render_rule_editor(console: Console, state: _RuleEditorState) -> Group:
 
 
 def _render_add_rule_editor(console: Console, state: _RuleEditorState) -> Group:
+    """Render the editor view used when creating a rule."""
     return _render_rule_editor(console, state)
 
 
 def _save_editor_rule(
     state: _RuleEditorState, rules: list[ColorRule], rules_path: Path, profile: str | None
 ) -> str | None:
+    """Persist the editor's rule and refresh the in-memory rules list."""
     rule = state.rule
     try:
         _load_settings(rules_path.parent, profile)
@@ -1146,6 +1199,7 @@ def _rule_editor(
     console: Console, live: Live, rules: list[ColorRule], rules_path: Path,
     keyboard_fd: int, profile: str | None, rule: ColorRule | None = None,
 ) -> str:
+    """Handle keyboard input for adding or editing a coloring rule."""
     state = _RuleEditorState(
         rule.pattern if rule else "",
         rule.color if rule else "none",
@@ -1236,6 +1290,7 @@ def _select_profile(
     source_file: str | None = None,
     selected_index: int | None = None,
 ) -> tuple[bool | str, str | None] | None:
+    """Display the profile selector and return the selected action or cancellation."""
     config = _read_toml(config_path) if config_path.exists() else {}
     profiles = _parse_rule_profiles(config, config_path, allow_builtins=True)
     _parse_profile_paths(config, config_path, profiles)
@@ -1250,7 +1305,9 @@ def _select_profile(
     message = ""
 
     def render() -> Group:
+        """Build the selector view around the currently selected profile."""
         def make_table(start: int, end: int) -> Table:
+            """Build a bounded table showing profile names and associated paths."""
             table = Table(title="Select profile", box=None)
             table.add_column("Profile")
             table.add_column("Associated paths")
@@ -1324,6 +1381,7 @@ def _select_profile(
 def _associate_profile(
     console: Console, config_path: Path, keyboard_fd: int, filename: str, profile: str
 ) -> None:
+    """Interactively associate the current file or its directory with a profile."""
     console.print("Associate profile with: f: this file  d: its directory  Escape: cancel")
     choice = _read_rule_key(keyboard_fd).lower()
     if choice not in ("f", "d"):
@@ -1353,6 +1411,7 @@ def _prompt_profile_name(
     keyboard_fd: int,
     original_terminal: list[Any],
 ) -> str | None:
+    """Prompt for a profile name while temporarily restoring terminal input."""
     termios.tcsetattr(keyboard_fd, termios.TCSADRAIN, original_terminal)
     try:
         name = input("New profile name (blank cancels): ").strip()
@@ -1379,6 +1438,7 @@ def _manage_profiles(
     source_file: str | None = None,
     session_only: bool = False,
 ) -> str | None:
+    """Manage profile selection, creation, rules, and file associations."""
     config_path = rules_path.with_name("ctail.toml")
     selected_index: int | None = None
     while True:
@@ -1472,6 +1532,7 @@ def _manage_profiles(
 def _render_rule_manager(
     console: Console, rules: list[ColorRule], selected: int, message: str
 ) -> Group:
+    """Render a terminal-sized table of custom rules and available actions."""
     rules = [rule for rule in rules if rule.source != "built-in"]
     headings = ("", "Status", "Source", "Profile", "Type", "Name", "Pattern", "Style")
     rows = [
@@ -1495,6 +1556,7 @@ def _render_rule_manager(
     ]
 
     def make_table(start: int, end: int) -> Table:
+        """Build a slice of the rule table with the selected row highlighted."""
         table = Table(title="Rules manager", box=None, padding=(0, 0, 0, 1))
         for heading, width in zip(headings, widths):
             flexible = heading in {"Source", "Profile", "Name", "Pattern", "Style"}
@@ -1537,6 +1599,7 @@ def _render_rule_manager(
     table_height = max(3, console.size.height - footer_height)
 
     def fits(candidate: Table) -> bool:
+        """Report whether a candidate rule table fits in its allotted height."""
         return len(console.render_lines(candidate, options=console.options, pad=False)) <= table_height
 
     while start > 0:
@@ -1558,6 +1621,7 @@ def _manage_rules(
     console: Console, rules: list[ColorRule], rules_path: Path,
     keyboard_fd: int, *, profile: str | None = None,
 ) -> None:
+    """Run the interactive manager for enabling, editing, copying, or removing rules."""
     selected = 0
     message = ""
     mode = "list"
@@ -1567,9 +1631,11 @@ def _manage_rules(
     cursor = 0
 
     def listed_rules() -> list[ColorRule]:
+        """Return the custom rules currently visible in the manager."""
         return [rule for rule in rules if rule.source != "built-in"]
 
     def render() -> Group:
+        """Render the current rule-manager mode and its controls."""
         if mode == "rename":
             return Group(
                 Text("Rename rule", style="bold"),
@@ -1735,14 +1801,15 @@ def _manage_rules(
 
 
 def _show_interactive_help(console: Console, keyboard_fd: int) -> None:
+    """Show interactive key bindings until the user presses a key."""
     commands = Table(show_header=True, header_style="bold")
     commands.add_column("Key", style="cyan", no_wrap=True)
     commands.add_column("Command")
     commands.add_row("Space", "Pause or resume log output")
     commands.add_row("p", "Select a coloring-rule profile")
-    commands.add_row("c", "Add a color rule")
+    commands.add_row("c", "Add a coloring-rule")
     commands.add_row("f", "Toggle display of unmatched lines")
-    commands.add_row("r", "Open the rules manager")
+    commands.add_row("r", "Open the coloring-rules manager")
     commands.add_row("?", "Show this command list")
     commands.add_row("q", "Quit ctail")
     help_view = Group(
@@ -1770,6 +1837,7 @@ def _consume_stream(
     source_file: str | None = None,
     session_only_profile: bool = False,
 ) -> bool:
+    """Read log bytes, process interactive keys, and print styled complete lines."""
     buffer = bytearray()
     paused = False
     running = True
@@ -1838,6 +1906,7 @@ def _consume_stream(
 
 
 def _tail_process(arguments: list[str]) -> subprocess.Popen[bytes]:
+    """Start the system ``tail`` command and return its byte-stream process."""
     tail = shutil.which("tail")
     if tail is None:
         raise RuntimeError("could not find the 'tail' executable")
@@ -1856,6 +1925,7 @@ def _tail_process(arguments: list[str]) -> subprocess.Popen[bytes]:
 
 
 def _less_process() -> subprocess.Popen[str]:
+    """Start ``less -R`` with a UTF-8 text input stream."""
     less = shutil.which("less")
     if less is None:
         raise RuntimeError("could not find the 'less' executable")
@@ -1880,6 +1950,7 @@ def _colorize_stream(
     rules: list[ColorRule],
     show_unmatched: bool,
 ) -> None:
+    """Decode and colorize each line from a binary input stream."""
     for raw_line in source:
         rendered = _render_line(raw_line.decode("utf-8", errors="replace"), rules, show_unmatched)
         if rendered is not None:
@@ -1887,6 +1958,7 @@ def _colorize_stream(
 
 
 def _close_pager_input(stream: TextIO) -> None:
+    """Close the pager input stream while tolerating an already-closed pipe."""
     try:
         stream.close()
     except BrokenPipeError:
@@ -1899,6 +1971,7 @@ def _show_with_less(
     rules: list[ColorRule],
     show_unmatched: bool,
 ) -> None:
+    """Colorize input and send it to ``less``, validating its exit status."""
     file_arguments = arguments[1:] if arguments[:1] == ["--"] else arguments
     if any(argument.startswith("-") for argument in file_arguments):
         raise ValueError("--less accepts file paths, not tail options")
@@ -1934,15 +2007,16 @@ def _show_with_less(
 
 
 def main() -> None:
+    """Parse command-line options and run the selected ctail mode."""
     parser = argparse.ArgumentParser(
         description="Colorize log output and either tail it or page through it.",
         epilog=(
             "Interactive file-following keys (when stdin and stdout are terminals):\n"
             "  Enter  Print a blank line to separate log output\n"
             "  Space  Pause or resume log output\n"
-            "  p      Select a coloring-rule profile (n adds one)\n"
-            "  c      Add a color rule\n"
-            "  r      Open the rules manager\n"
+            "  p      Select a coloring-rules profile\n"
+            "  c      Add a coloring-rule\n"
+            "  r      Open the coloring-rules manager\n"
             "  ?      Show the interactive command list\n"
             "  q      Quit ctail"
         ),
