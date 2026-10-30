@@ -21,16 +21,31 @@ cat application.log | ctail -l
 Use `ctail --version` (or `ctail -v`) to show the installed package version.
 The version is maintained in `pyproject.toml`.
 
-## Install from Github
+## Install from GitHub
 
-With SSH access to the Github repository and Python 3.14 or newer, install the
-tool with either `uv` or `pipx`:
+With Git installed and Python 3.14 or newer available, install the tool with
+either `uv` or `pipx`. HTTPS is convenient for containers because a public
+repository does not require SSH keys:
 
 ```sh
-uv tool install 'git+ssh@github.com:dejansa/ctail.git'
+uv tool install 'git+https://github.com/dejansa/ctail.git'
 # or
-pipx install 'git+ssh@github.com:dejansa/ctail.git'
+pipx install 'git+https://github.com/dejansa/ctail.git'
 ```
+
+Alternatively, if SSH access to GitHub is configured in the environment where
+you run the command:
+
+```sh
+uv tool install 'git+ssh://git@github.com/dejansa/ctail.git'
+# or
+pipx install 'git+ssh://git@github.com/dejansa/ctail.git'
+```
+
+Use the full URL syntax shown above, not Git's scp-style
+`git@github.com:dejansa/ctail.git` or `git+ssh@github.com:dejansa/ctail.git`.
+In a container, SSH installation requires an SSH client, authentication, and
+trusted GitHub host keys configured inside the container.
 
 Both commands install the `ctail` command into the tool's executable path
 (typically `~/.local/bin`). On the first run, `ctail` creates
