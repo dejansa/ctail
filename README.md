@@ -103,6 +103,10 @@ color = "bright_cyan"
 `name` is an optional descriptive label for a rule. It is shown with the
 pattern in `--show-rules` and the interactive rule selector. Existing rules
 without a name remain valid.
+`sample` is an optional example log line used only by the interactive rule
+editor's preview; it does not affect matching. Without it, the preview uses the
+pattern text. For capture-group rules, set it to a matching log line to see the
+configured group colors.
 
 Colors use Rich style names, including the standard and bright ANSI colors,
 256-color names such as `orange3`, and combinations such as `bold magenta`.
@@ -242,8 +246,42 @@ Press **c** while following a log or **a** in the rules manager. Type the
 pattern, then use **Left/Right** to select Foreground or Background.
 Both colors start at `none`; **Up/Down** browse colors, with basic colors first.
 Press **b** on Foreground to toggle bold, or **i** on Background to toggle
-inverse. Style is shown for reference. Press **Enter** on either color to save,
-or **Escape** to discard changes. Validation errors leave the dialog open.
+inverse. Press **Down** from Mode to select Style, then **Down** again for
+Name; **Up** moves back. Press **Enter** on Style or Name to edit the text,
+**Left/Right** to move the cursor, **Backspace** to delete, **Enter** to accept,
+or **Escape** to discard that text edit. Style accepts the same Rich syntax
+as `color` in TOML, including capture-group styles; invalid styles leave the
+text editor open. Name is optional; clearing it removes the name.
+From Style, **Left** returns to Background; from Name, **Right** returns to
+Foreground. Press **Escape** to discard changes.
+Validation errors leave the dialog open.
+
+Press **Ctrl+Enter** or **Ctrl+S** from any field to validate and save the
+entire rule, including text currently being edited. These are the only save
+shortcuts. Normal **Enter** only edits/accepts field text or toggles Mode;
+it does nothing on Foreground or Background and never saves the rule.
+Ctrl+Enter requires a terminal that sends a
+distinct modified-Enter sequence (CSI-u or xterm modifyOtherKeys); terminals
+that send it as ordinary Enter cannot distinguish the two. Use Ctrl+S in
+that case, or configure the terminal to send `ESC [ 13 ; 5 u` for Ctrl+Enter.
+Terminal or editor keybindings may also intercept shortcuts.
+
+The **Sample** field stores an optional example log line, shown separately
+from the **Preview** row. Press **Down** from Name to select Sample, then
+**Enter** to edit it. Use **Left/Right** and **Backspace** to edit, **Enter**
+to accept, or **Escape** to discard the edit. The preview updates as you type
+sample text, Pattern, or Style, using the same coloring logic as log output,
+including comma-separated capture-group styles and the optional remainder
+style. With an empty Sample field, Preview uses the pattern text; replace it
+with an actual matching log line for regex rules. Nonmatching samples show
+`[no match]`; invalid patterns or styles show a preview error.
+The sample is saved with the rule as `sample = "..."`, and is used only for
+the editor preview; it does not change matching. Clearing the sample removes
+the optional setting and restores the pattern-text preview.
+For example, use pattern `(write) (results) to (automation) API`,
+style `red on green, blue, cyan, yellow`, and sample
+`write results to automation API` to preview the three group colors and
+the yellow remainder exactly as they appear in logs.
 
 New rules start in literal mode. Typing any of `. ^ $ * + ? { } [ ] \ | ( )`
 automatically switches to regex mode. Press **Down** from Pattern to select
@@ -260,14 +298,16 @@ rules manager to copy a custom rule to another named profile.
 ### Editing a rule
 
 Select **e** in the rules manager. Editing uses the same dialog and controls as
-adding, prefilled with the selected rule's pattern, colors and mode. Use
+adding, prefilled with the selected rule's pattern, colors, mode and name. Use
 **Left/Right** to select Pattern, Foreground or Background; **Up/Down** browse
 colors, with basic colors first. Press **b** on Foreground to toggle bold, or
-**i** on Background to toggle inverse. Style is shown for reference. Press
-**Enter** on either color to validate and save, or **Escape** to discard
+**i** on Background to toggle inverse. Style and Name can be edited with
+the same controls described above. Press **Ctrl+Enter** or **Ctrl+S** on any
+field to validate and save, or **Escape** to discard
 changes. Validation errors leave the dialog open.
 
-The selected rule's file, scope, priority, name and enabled state are retained.
+The selected rule's file, scope, priority and enabled state are retained.
+Name and style are retained unless changed.
 Mode is also retained unless changed. With Pattern selected, type directly and
 use **Backspace** to remove the last character. Regex metacharacters
 automatically switch to regex mode. Press **Down** from Pattern to select Mode;

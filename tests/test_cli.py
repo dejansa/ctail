@@ -502,6 +502,7 @@ class ListingTests(unittest.TestCase):
         line = "before status=404 route=/x"
         pattern = r"(status=)(\d{3}).*"
         source = self.config_dir / "ctail.toml"
+        console = Console(file=io.StringIO())
 
         for colors, expected in (
             (
@@ -538,7 +539,7 @@ class ListingTests(unittest.TestCase):
                 assert rendered is not None
                 self.assertEqual(rendered.plain, line)
                 for offset, style in expected.items():
-                    self.assertEqual(rendered.get_style_at_offset(offset), style)
+                    self.assertEqual(rendered.get_style_at_offset(console, offset), style)
 
     def test_capture_group_color_parser_preserves_rgb_commas(self):
         rules = _parse_rules(
