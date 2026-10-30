@@ -27,9 +27,9 @@ With SSH access to the GitLab repository and Python 3.14 or newer, install the
 tool with either `uv` or `pipx`:
 
 ```sh
-uv tool install 'git+ssh://git@gitlab.com/aviatnetworks/qa/tools/ctail.git'
+uv tool install 'git+ssh@github.com:dejansa/ctail.git'
 # or
-pipx install 'git+ssh://git@gitlab.com/aviatnetworks/qa/tools/ctail.git'
+pipx install 'git+ssh@github.com:dejansa/ctail.git'
 ```
 
 Both commands install the `ctail` command into the tool's executable path
