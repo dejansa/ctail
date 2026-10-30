@@ -30,6 +30,7 @@ from ctail.cli import (
     _RULE_EDITOR_COLORS,
     _RULE_EDITOR_FIELDS,
     _editor_change_style,
+    _editor_target_color,
     _editor_style,
     _editor_text_window,
     _edit_rule,
@@ -43,6 +44,8 @@ from ctail.cli import (
     _render_line,
     _render_rule_manager,
     _render_rule_editor,
+    _render_editor_attributes,
+    _render_editor_color_row,
     _render_editor_preview,
     _rule_editor,
     _RuleEditorState,
@@ -94,7 +97,7 @@ class RuleManagementTests(unittest.TestCase):
             )
         return message, live
 
-    def test_rule_dialogs_show_mode_style_and_preview_on_separate_rows(self):
+    def test_rule_dialogs_follow_the_match_then_style_flow(self):
         rule = _parse_rules([{"pattern": "example", "color": "red"}], self.rules_path)[0]
         for adding in (True, False):
             for height in (8, 12, 24):
@@ -108,20 +111,28 @@ class RuleManagementTests(unittest.TestCase):
                     )
                     console.print(view)
                     lines = output.getvalue().splitlines()
-                    mode = next(index for index, line in enumerate(lines) if "Mode:" in line)
-                    self.assertTrue(lines[mode + 1].lstrip(" >").startswith("Style:"))
-                    self.assertTrue(lines[mode + 2].lstrip(" >").startswith("Name:"))
-                    self.assertTrue(lines[mode + 3].lstrip(" >").startswith("Sample:"))
-                    self.assertTrue(lines[mode + 4].lstrip(" >").startswith("Preview:"))
+                    expected_labels = (
+                        "Pattern:", "Mode:", "Foreground:", "Background:",
+                        "Attributes:", "Style:", "Preview:",
+                    ) if height >= 12 else ("Pattern:", "Mode:", "Style:")
+                    labels = [
+                        next(index for index, line in enumerate(lines) if label in line)
+                        for label in expected_labels
+                    ]
+                    self.assertEqual(labels, sorted(labels))
                     if height >= 12:
-                        self.assertEqual(lines[mode + 5], "")
+                        self.assertIn("Name:", "\n".join(lines))
+                        self.assertIn("Sample:", "\n".join(lines))
                     self.assertLessEqual(len(lines), height)
 
     def test_add_dialog_shortcuts_and_default_only_scope(self):
         self.config_path.write_text("[profiles.other]\n")
         rules = self.load_rules()
         message, _ = self.run_editor(
-            rules, list("example") + ["right", "down", "b", "right", "down", "i", "save"]
+            rules, list("example") + [
+                "down", "down", "right", "down", "right", "down",
+                " ", "right", "right", "right", " ", "save",
+            ]
         )
         self.assertEqual(message, "Added rule.")
         entry = tomllib.loads(self.config_path.read_text())["rules"][0]
@@ -133,7 +144,7 @@ class RuleManagementTests(unittest.TestCase):
         self.assertEqual(style.bgcolor.name, "black")
         self.assertNotIn("example", [rule.pattern for rule in _load_settings(self.config_dir, "other")[1]])
 
-    def test_add_dialog_colors_layout_and_compact_display(self):
+    def test_add_dialog_shows_multiple_horizontal_color_choices(self):
         self.assertEqual(
             _RULE_EDITOR_COLORS[:9],
             ("none", "black", "white", "red", "green", "blue", "yellow", "magenta", "cyan"),
@@ -145,14 +156,18 @@ class RuleManagementTests(unittest.TestCase):
             console.print(_render_add_rule_editor(console, state))
             text = output.getvalue()
             lines = text.splitlines()
-            self.assertIn(">none", lines[2])
-            self.assertIn("black", lines[3])
-            self.assertIn("white", lines[4])
-            self.assertIn("red", lines[5])
-            self.assertIn("green", lines[6])
+            color_row = next(line for line in lines if line.lstrip().startswith(
+                ("> Foreground:", "> Background:")
+            ))
+            self.assertGreaterEqual(
+                sum(name in color_row for name in ("none", "black", "white", "red", "green")),
+                2,
+            )
             self.assertIn("Style: none", text)
-            for control in ("Scope:", "Bold:", "Inverse:", " Save", " Cancel"):
+            for control in ("Scope:", " Save", " Cancel"):
                 self.assertNotIn(control, text)
+            self.assertIn("Italic", text)
+            self.assertIn("Inverse", text)
         for width in (42, 60, 80, 160):
             with self.subTest(width=width):
                 output = io.StringIO()
@@ -184,7 +199,7 @@ class RuleManagementTests(unittest.TestCase):
         )
         self.assertEqual(message, "Added rule.")
         self.assertTrue(any(
-            any("Mode: regex" in getattr(item, "plain", "")
+            any("[Regex]" in getattr(item, "plain", "")
                 for item in call.args[0].renderables)
             for call in live.update.call_args_list[3:4]
         ))
@@ -212,12 +227,14 @@ class RuleManagementTests(unittest.TestCase):
                 self.assertEqual(message, "Canceled.")
                 frames = live.update.call_args_list
                 self.assertTrue(any(
-                    any("Mode: regex" in getattr(item, "plain", "")
+                    any("[Regex]" in getattr(item, "plain", "")
                         for item in call.args[0].renderables)
                     for call in frames
                 ))
         rules = self.load_rules()
-        message, _ = self.run_editor(rules, ["x", ".", "down", "enter", "up", "save"])
+        message, _ = self.run_editor(
+            rules, ["x", ".", "down", "enter", "left", "enter", "up", "save"]
+        )
         self.assertEqual(message, "Added rule.")
         self.assertFalse(rules[0].regex_enabled)
 
@@ -645,14 +662,88 @@ class RuleManagementTests(unittest.TestCase):
     def test_editor_edit_can_switch_literal_and_regex(self):
         self.rules_path.write_text('[[rules]]\npattern="a+"\ncolor="red"\nregex=false\n')
         rules = self.load_rules()
-        for expected in (True, False):
-            with self.subTest(regex=expected):
-                message, _ = self.run_editor(
-                    rules, ["down", "enter", "up", "save"], rule=rules[0]
-                )
+        message, _ = self.run_editor(rules, ["down", "right", "save"], rule=rules[0])
+        self.assertEqual(message, "Edited rule.")
+        self.assertTrue(rules[0].regex_enabled)
+        self.assertTrue(tomllib.loads(self.rules_path.read_text())["rules"][0]["regex"])
+        message, _ = self.run_editor(rules, ["down", "left", "save"], rule=rules[0])
+        self.assertEqual(message, "Edited rule.")
+        self.assertFalse(rules[0].regex_enabled)
+        self.assertFalse(tomllib.loads(self.rules_path.read_text())["rules"][0]["regex"])
+
+    def test_editor_escape_cancels_mode_change(self):
+        self.rules_path.write_text('[[rules]]\npattern="a+"\ncolor="red"\nregex=false\n')
+        rules = self.load_rules()
+        original = self.rules_path.read_bytes()
+        message, _ = self.run_editor(
+            rules, ["down", "right", "cancel"], rule=rules[0]
+        )
+        self.assertEqual(message, "Canceled.")
+        self.assertFalse(rules[0].regex_enabled)
+        self.assertEqual(self.rules_path.read_bytes(), original)
+
+    def test_editor_mode_enter_edits_without_changing_value(self):
+        self.rules_path.write_text('[[rules]]\npattern="a+"\ncolor="red"\nregex=false\n')
+        rules = self.load_rules()
+        message, live = self.run_editor(
+            rules, ["down", "enter", "enter", "save"], rule=rules[0]
+        )
+        self.assertEqual(message, "Edited rule.")
+        self.assertFalse(rules[0].regex_enabled)
+        frame = live.update.call_args_list[2].args[0]
+        mode = next(row for row in frame.renderables if isinstance(row, Text) and "Mode:" in row.plain)
+        self.assertIn("[Literal]", mode.plain)
+        self.assertEqual(mode.get_style_at_offset(self.console, 2).color, Style.parse("cyan").color)
+
+    def test_editor_mode_edit_confirm_cancel_and_save_preserve_pattern(self):
+        for finish, expected in (("enter", True), ("cancel", False), ("save", True)):
+            with self.subTest(finish=finish):
+                self.rules_path.write_text('[[rules]]\npattern="a+"\ncolor="red"\nregex=false\n')
+                rules = self.load_rules()
+                keys = ["down", "enter", "right", finish]
+                if finish != "save":
+                    keys.append("save")
+                message, _ = self.run_editor(rules, keys, rule=rules[0])
                 self.assertEqual(message, "Edited rule.")
+                self.assertEqual(rules[0].pattern, "a+")
                 self.assertEqual(rules[0].regex_enabled, expected)
-                self.assertEqual(tomllib.loads(self.rules_path.read_text())["rules"][0]["regex"], expected)
+
+    def test_editor_all_captions_have_two_column_indent(self):
+        console = Console(file=io.StringIO(), width=160, height=24)
+        for field in _RULE_EDITOR_FIELDS:
+            with self.subTest(field=field):
+                state = _RuleEditorState(
+                    "(x)", "red", None, None, regex_enabled=True,
+                    field=_RULE_EDITOR_FIELDS.index(field), preview_text="x",
+                )
+                view = _render_rule_editor(console, state)
+                for label in (*_RULE_EDITOR_FIELDS[:7], "Attributes", "Style target", "Preview"):
+                    row = next(
+                        row for row in view.renderables
+                        if isinstance(row, Text) and row.plain.lstrip("> ").startswith(f"{label}:")
+                    )
+                    self.assertIn(row.plain[:2], ("  ", "> "))
+                    self.assertTrue(row.plain[2:].startswith(f"{label}:"))
+
+    def test_editor_color_names_have_fixed_right_padded_slots(self):
+        console = Console(file=io.StringIO(), width=160, height=24)
+        name_width = max(cell_len(name) for name in _RULE_EDITOR_COLORS)
+        for field in ("Foreground", "Background"):
+            for name in ("none", "red", "magenta", "medium_orchid", "#123456"):
+                with self.subTest(field=field, color=name):
+                    color = f"on {name}" if field == "Background" and name != "none" else name
+                    row = _render_editor_color_row(
+                        console, _RuleEditorState("x", color, None, None), field
+                    )
+                    swatches = row.plain.split(": ", 1)[1][2:-2]
+                    slot_width = name_width + 2
+                    self.assertEqual(cell_len(swatches), slot_width * 5)
+                    for start in range(0, len(swatches), slot_width):
+                        token = swatches[start:start + slot_width]
+                        value = token.strip(" []")
+                        self.assertEqual(token[1:1 + len(value)], value)
+                        expected = f"[{value}]" if token.startswith("[") else f" {value} "
+                        self.assertEqual(token, expected.ljust(slot_width))
 
     def test_editor_invalid_new_regex_does_not_save(self):
         rules = self.load_rules()
@@ -670,7 +761,7 @@ class RuleManagementTests(unittest.TestCase):
         rules = self.load_rules()
         original = rules[0]
         message, live = self.run_editor(
-            rules, ["down", "enter", "up", "save"], rule=original
+            rules, ["down", "left", "save"], rule=original
         )
         self.assertEqual(message, "Edited rule.")
         self.assertTrue(rules[0].regex_enabled)
@@ -678,6 +769,18 @@ class RuleManagementTests(unittest.TestCase):
             "must use regex" in call.args[0].renderables[-1].plain
             for call in live.update.call_args_list
         ))
+
+    def test_editor_builtin_mode_cannot_enter_editing(self):
+        rules = self.load_rules()
+        message, live = self.run_editor(
+            rules, ["down", "enter", "save"], rule=rules[0]
+        )
+        self.assertEqual(message, "Edited rule.")
+        self.assertTrue(rules[0].regex_enabled)
+        frame = live.update.call_args_list[2].args[0]
+        self.assertIn("must use regex", frame.renderables[-1].plain)
+        mode = next(row for row in frame.renderables if isinstance(row, Text) and "Mode:" in row.plain)
+        self.assertIsNone(mode.get_style_at_offset(self.console, 2).color)
 
     def test_editor_cancels_and_does_not_save_invalid_values(self):
         self.write_custom_rules()
@@ -721,9 +824,9 @@ class RuleManagementTests(unittest.TestCase):
         )
         rules = self.load_rules()
         custom = next(rule for rule in rules if rule.pattern == "user")
-        self.run_editor(rules, ["right", "down", "save"], rule=custom)
+        self.run_editor(rules, ["down", "down", "right", "save"], rule=custom)
         builtin = next(rule for rule in rules if rule.pattern == DEFAULT_RULES[0][0])
-        self.run_editor(rules, ["right", "down", "save"], rule=builtin)
+        self.run_editor(rules, ["down", "down", "right", "save"], rule=builtin)
         data = tomllib.loads(self.config_path.read_text())
         self.assertEqual(len(data["rules"]), 2)
         self.assertEqual(data["rules"][0]["name"], "Example")
@@ -747,28 +850,219 @@ class RuleManagementTests(unittest.TestCase):
             for call in live.update.call_args_list
         ))
 
-    def test_editor_complex_style_is_preserved_and_controls_do_not_simplify(self):
+    def test_editor_complex_style_color_controls_preserve_other_attributes(self):
         color = "italic #123456 on blue, bold rgb(1,2,3)"
         self.rules_path.write_text(
             f'[[rules]]\npattern="(x)"\ncolor="{color}"\n'
         )
         rules = self.load_rules()
         message, live = self.run_editor(
-            rules, ["right", "down", "save"], rule=rules[0]
+            rules, ["down", "down", "down", "right", "save"], rule=rules[0]
         )
         self.assertEqual(message, "Edited rule.")
-        self.assertEqual(tomllib.loads(self.rules_path.read_text())["rules"][0]["color"], color)
-        self.assertTrue(any(
+        saved_color = tomllib.loads(self.rules_path.read_text())["rules"][0]["color"]
+        self.assertEqual(saved_color, "italic black on blue, bold rgb(1,2,3)")
+        self.assertFalse(any(
             "Complex style" in call.args[0].renderables[-1].plain
             for call in live.update.call_args_list
         ))
+        style = _editor_style(saved_color.split(", ", maxsplit=1)[0])
+        self.assertTrue(style.italic)
+        self.assertEqual(style.bgcolor.name, "blue")
+
+    def test_editor_color_controls_preserve_decorations(self):
+        state = _RuleEditorState("x", "underline blue on white", None, None)
+
+        _editor_change_style(state, "Foreground", 1)
+        style = _editor_style(state.color)
+        self.assertTrue(style.underline)
+        self.assertNotEqual(style.color.name, "blue")
+        self.assertEqual(style.bgcolor.name, "white")
+
+        _editor_change_style(state, "Background", 1)
+        style = _editor_style(state.color)
+        self.assertTrue(style.underline)
+        self.assertNotEqual(style.bgcolor.name, "white")
+
+    def test_editor_group_target_edits_only_selected_style(self):
+        state = _RuleEditorState(
+            "(x)(y)", "red, blue, yellow", None, None, regex_enabled=True, target=1
+        )
+        _editor_change_style(state, "Bold", 1)
+        self.assertEqual(state.color, "red, b blue, yellow")
+        _editor_change_style(state, "Background", 1)
+        self.assertEqual(state.color, "red, b blue on black, yellow")
+        state.target = 2
+        _editor_change_style(state, "Inverse", 1)
+        self.assertEqual(state.color, "red, b blue on black, reverse yellow")
+        state.target = 0
+        _editor_change_style(state, "Foreground", 1)
+        self.assertEqual(state.color, "green, b blue on black, reverse yellow")
+
+    def test_editor_group_target_pads_missing_styles_and_preserves_rgb(self):
+        state = _RuleEditorState(
+            "(x)(y)", "rgb(1,2,3)", None, None, regex_enabled=True, target=2
+        )
+        self.assertEqual(_editor_target_color(state), "none")
+        _editor_change_style(state, "Foreground", 1)
+        self.assertEqual(state.color, "rgb(1,2,3), none, black")
+        state.target = 0
+        _editor_change_style(state, "Bold", 1)
+        self.assertEqual(state.color, "b rgb(1,2,3), none, black")
+        rule = _parse_rules([{"pattern": state.pattern, "color": state.color}], self.rules_path)[0]
+        self.assertEqual(rule.group_colors, ("b rgb(1,2,3)", "none", "black"))
+
+    def test_editor_group_target_handles_nested_groups_and_complex_siblings(self):
+        state = _RuleEditorState(
+            "(?P<outer>x(y))(?:z)", "red, italic blue", None, None,
+            regex_enabled=True, target=0,
+        )
+        _editor_change_style(state, "Bold", 1)
+        self.assertEqual(state.color, "b red, italic blue")
+        state.target = 1
+        _editor_change_style(state, "Foreground", 1)
+        style = _editor_style(_editor_target_color(state))
+        self.assertTrue(style.italic)
+        self.assertNotEqual(style.color.name, "blue")
+        self.assertFalse(state.message)
+        state.target = 2
+        _editor_change_style(state, "Background", 1)
+        self.assertTrue(state.color.startswith("b red, italic "))
+        self.assertTrue(state.color.endswith(", on black"))
+
+    def test_editor_adds_group_rule_using_visual_controls(self):
+        rules = self.load_rules()
+        message, _ = self.run_editor(rules, [
+            *"(x):(y)", "down", "down", "right", "down", "down", "down", " ", "save",
+        ])
+        self.assertEqual(message, "Added rule.")
+        self.assertEqual(rules[0].color, "none, b")
+        self.assertEqual(self.load_rules()[0].group_colors, ("none", "b"))
+
+    def test_editor_group_target_navigation_saves_and_reloads(self):
+        self.config_path.write_text(
+            '[[rules]]\npattern="(?P<first>x)(y)"\ncolor="red, blue"\nsample="xy"\n'
+        )
+        rules = self.load_rules()
+        message, live = self.run_editor(rules, [
+            "down", "down", "right", "down", "down", "down", " ",
+            "up", "up", "up", "right", "down", "right", "save",
+        ], rule=rules[0])
+        self.assertEqual(message, "Edited rule.")
+        self.assertEqual(rules[0].color, "red, b blue, black")
+        self.assertEqual(self.load_rules()[0].color, rules[0].color)
+        frames = [
+            item.plain for call in live.update.call_args_list
+            for item in call.args[0].renderables if isinstance(item, Text)
+        ]
+        self.assertTrue(any("Group 1 (first): 'x'" in text for text in frames))
+        self.assertTrue(any("Group 2: 'y'" in text for text in frames))
+        self.assertTrue(any("Rest of match" in text for text in frames))
+
+    def test_editor_target_enter_does_not_save_and_escape_discards_changes(self):
+        self.config_path.write_text('[[rules]]\npattern="(x)"\ncolor="red"\n')
+        rules = self.load_rules()
+        before = self.config_path.read_bytes()
+        with patch("ctail.cli._save_editor_rule") as save:
+            message, _ = self.run_editor(rules, [
+                "down", "down", "left", "right", "enter", "cancel",
+            ], rule=rules[0])
+        self.assertEqual(message, "Canceled.")
+        save.assert_not_called()
+        self.assertEqual(self.config_path.read_bytes(), before)
+        self.assertEqual(rules[0].color, "red")
+
+    def test_editor_save_from_target_preserves_raw_styles(self):
+        self.config_path.write_text(
+            '[[rules]]\npattern="(x)"\ncolor="italic red, rgb(1,2,3)"\n'
+        )
+        rules = self.load_rules()
+        message, _ = self.run_editor(
+            rules, ["down", "down", "right", "save"], rule=rules[0]
+        )
+        self.assertEqual(message, "Edited rule.")
+        self.assertEqual(rules[0].color, "italic red, rgb(1,2,3)")
+
+    def test_editor_target_adapts_to_pattern_without_discarding_styles(self):
+        state = _RuleEditorState(
+            "(x)(y)", "red, blue, yellow", None, None, regex_enabled=True, target=2
+        )
+        state.pattern = "(x)"
+        self.assertEqual(_editor_target_color(state), "blue")
+        self.assertEqual(state.target, 1)
+        self.assertEqual(state.color, "red, blue, yellow")
+        for pattern, regex_enabled in (("(", True), ("(?:x)", True), ("(x)", False)):
+            state.pattern, state.regex_enabled = pattern, regex_enabled
+            self.assertEqual(_editor_target_color(state), state.color)
+            output = io.StringIO()
+            console = Console(file=output, width=100, height=24, color_system=None)
+            console.print(_render_rule_editor(console, state))
+            self.assertNotIn("Style target:", output.getvalue())
+
+    def test_editor_removing_groups_reports_excess_styles_without_losing_data(self):
+        self.config_path.write_text(
+            '[[rules]]\npattern="(x)(y)"\ncolor="red, blue, yellow"\n'
+        )
+        rules = self.load_rules()
+        before = self.config_path.read_bytes()
+        message, live = self.run_editor(rules, [
+            "enter", *["backspace"] * 6, *"(x)", "save", "cancel",
+        ], rule=rules[0])
+        self.assertEqual(message, "Canceled.")
+        self.assertEqual(self.config_path.read_bytes(), before)
+        self.assertEqual(rules[0].color, "red, blue, yellow")
+        self.assertTrue(any(
+            "accepts at most 2 colors" in call.args[0].renderables[-1].plain
+            for call in live.update.call_args_list
+        ))
+
+    def test_editor_group_preview_marks_selected_part_without_changing_log_preview(self):
+        for target, marked in ((0, "x"), (1, "y"), (2, ":")):
+            with self.subTest(target=target):
+                state = _RuleEditorState(
+                    "(x):(y)", "red, blue, yellow", None, None, field=7,
+                    regex_enabled=True, preview_text="x:y x:y", target=target,
+                )
+                view = _render_rule_editor(self.console, state)
+                preview = next(
+                    item for item in view.renderables
+                    if isinstance(item, Text) and item.plain.startswith("  Preview:")
+                )
+                for position, character in enumerate(preview.plain):
+                    style = preview.get_style_at_offset(self.console, position)
+                    self.assertEqual(
+                        bool(style.underline),
+                        position >= len("  Preview: ") and character == marked,
+                    )
+                plain_preview = _render_editor_preview(state)
+                self.assertFalse(any(span.style == "underline" for span in plain_preview.spans))
+
+    def test_editor_group_layout_fits_short_and_narrow_terminals(self):
+        for width in (42, 80, 160):
+            for height in (8, 12, 24):
+                with self.subTest(width=width, height=height):
+                    output = io.StringIO()
+                    console = Console(file=output, width=width, height=height, color_system=None)
+                    state = _RuleEditorState(
+                        "(?P<first>x)(y)?", "red, blue", None, None, field=7,
+                        regex_enabled=True, preview_text="x", target=1,
+                        message="Could not save rule",
+                    )
+                    console.print(_render_rule_editor(console, state))
+                    lines = output.getvalue().splitlines()
+                    self.assertLessEqual(len(lines), height)
+                    self.assertIn("Style target:", output.getvalue())
+                    self.assertIn("Group 2", output.getvalue())
+                    if height >= 24:
+                        self.assertIn("Sample: x", output.getvalue())
+                    self.assertIn("Could not save rule", output.getvalue())
 
     def test_edit_builtin_creates_override_in_current_profile_and_locks_pattern(self):
         self.config_path.write_text("[profiles.one]\n")
         rules = _load_settings(self.config_dir, "one")[1]
         rule = rules[0]
         message, live = self.run_editor(
-            rules, ["enter", "right", "down", "save"], "one", rule
+            rules, ["down", "down", "right", "up", "up", "x", "save"], "one", rule
         )
         self.assertEqual(message, "Edited rule.")
         entry = tomllib.loads(self.config_path.read_text())["profiles"]["one"]["rules"][0]
@@ -836,7 +1130,10 @@ class RuleManagementTests(unittest.TestCase):
     def test_editor_accepts_direct_pattern_input_and_navigation(self):
         rules = self.load_rules()
         message, _ = self.run_editor(
-            rules, list("caféx") + ["backspace", "right", "b", "right", "i", "save"]
+            rules, list("caféx") + [
+                "backspace", "down", "down", "right", "down", "right",
+                "down", " ", "right", "right", "right", " ", "save",
+            ]
         )
         self.assertEqual(message, "Added rule.")
         self.assertEqual(rules[0].pattern, "café")
@@ -859,7 +1156,10 @@ class RuleManagementTests(unittest.TestCase):
     def test_editor_can_toggle_bold_and_inverse_back_off(self):
         rules = self.load_rules()
         message, _ = self.run_editor(
-            rules, ["x", "right", "b", "b", "right", "i", "i", "save"]
+            rules, [
+                "x", "down", "down", "down", "down", " ", " ", "right",
+                "right", "right", " ", " ", "save",
+            ]
         )
         self.assertEqual(message, "Added rule.")
         style = _editor_style(rules[0].color)
@@ -871,12 +1171,72 @@ class RuleManagementTests(unittest.TestCase):
             tomllib.loads((self.config_dir / "default.rules.toml").read_text())["rules"][0]["color"], "none"
         )
 
+    def test_editor_attribute_row_toggles_underline_and_previews_it(self):
+        rules = self.load_rules()
+        message, live = self.run_editor(
+            rules, ["x", "down", "down", "down", "down", "right", " ", "save"]
+        )
+        self.assertEqual(message, "Added rule.")
+        self.assertEqual(rules[0].color, "u")
+        self.assertEqual(self.load_rules()[0].color, "u")
+        preview = _render_editor_preview(_RuleEditorState("x", rules[0].color, None, None))
+        style = preview.get_style_at_offset(self.console, 0)
+        self.assertTrue(style.underline)
+        self.assertTrue(any(
+            item.plain == "  Style: u"
+            for call in live.update.call_args_list
+            for item in call.args[0].renderables if isinstance(item, Text)
+        ))
+
+    def test_editor_attribute_row_toggles_italic(self):
+        rules = self.load_rules()
+        message, _ = self.run_editor(
+            rules, ["x", *["down"] * 4, "right", "right", " ", "save"]
+        )
+        self.assertEqual(message, "Added rule.")
+        style = _editor_style(rules[0].color)
+        self.assertTrue(style.italic)
+        self.assertIsNone(style.bold)
+
+    def test_editor_attribute_toggles_off(self):
+        for keys in (
+            ["x", "down", "down", "down", "down", "right", " ", " ", "save"],
+            ["x", "down", "down", "down", "down", "right", "right", "right", "right", " ", " ", "save"],
+        ):
+            with self.subTest(keys=keys):
+                rules = self.load_rules()
+                message, _ = self.run_editor(rules, keys)
+                self.assertEqual(message, "Added rule.")
+                self.assertEqual(rules[0].color, "none")
+
+    def test_editor_underline_toggle_preserves_other_attributes_and_links(self):
+        state = _RuleEditorState(
+            "x", "b italic red on blue link https://example.test/bold/underline", None, None
+        )
+        _editor_change_style(state, "Underline", 1)
+        self.assertEqual(
+            state.color, "b italic u red on blue link https://example.test/bold/underline"
+        )
+        _editor_change_style(state, "Underline", 1)
+        self.assertEqual(
+            state.color, "b italic red on blue link https://example.test/bold/underline"
+        )
+
+    def test_editor_underline_toggle_changes_only_selected_group(self):
+        state = _RuleEditorState(
+            "(x)(y)", "red, b blue, yellow", None, None, regex_enabled=True, target=1
+        )
+        _editor_change_style(state, "Underline", 1)
+        self.assertEqual(state.color, "red, b u blue, yellow")
+        _editor_change_style(state, "Underline", 1)
+        self.assertEqual(state.color, "red, b blue, yellow")
+
     def test_editor_toggling_off_only_unsets_selected_attribute(self):
         for field, initial, expected in (
             ("Bold", "bold reverse red on blue", "reverse red on blue"),
-            ("Inverse", "bold reverse red on blue", "bold red on blue"),
+            ("Inverse", "bold reverse red on blue", "b red on blue"),
             ("Bold", "bold not reverse red on blue", "not reverse red on blue"),
-            ("Inverse", "not bold reverse red on blue", "not bold red on blue"),
+            ("Inverse", "not bold reverse red on blue", "not b red on blue"),
         ):
             with self.subTest(field=field, initial=initial):
                 state = _RuleEditorState("x", initial, None, None)
@@ -891,26 +1251,126 @@ class RuleManagementTests(unittest.TestCase):
         self.assertIs(style.bold, False)
         self.assertIs(style.reverse, False)
 
-    def test_editor_table_has_fixed_columns_and_pattern_selection_marker(self):
-        expected_width = max(map(cell_len, _EDITOR_COLORS)) + 1
-        console = Console(file=io.StringIO(), width=100, height=24, color_system=None)
-        for field in range(3):
-            with self.subTest(field=field):
-                state = _RuleEditorState("x", "red on blue", None, None, field=field)
-                view = _render_rule_editor(console, state)
-                table = view.renderables[0]
-                self.assertEqual([column.width for column in table.columns], [55, expected_width, expected_width])
-                output = io.StringIO()
-                Console(file=output, width=100, height=24, color_system=None).print(table)
-                selected_line = next(line for line in output.getvalue().splitlines() if ">" in line)
-                self.assertEqual(selected_line.index(">"), (0, 55, 55 + expected_width)[field])
+    def test_editor_color_window_is_centered_and_limited_to_five_choices(self):
+        for field in ("Foreground", "Background"):
+            for width in (42, 80, 160):
+                console = Console(file=io.StringIO(), width=width, height=24)
+                for name in (*_RULE_EDITOR_COLORS, "#123456"):
+                    with self.subTest(field=field, width=width, color=name):
+                        color = f"on {name}" if field == "Background" and name != "none" else name
+                        state = _RuleEditorState("x", color, None, None)
+                        row = _render_editor_color_row(console, state, field)
+                        tokens = row.plain.split(": ", 1)[1].split()
+                        choices = [token.strip("[]") for token in tokens if token not in ("‹", "›")]
+                        self.assertGreaterEqual(len(choices), 1)
+                        self.assertLessEqual(len(choices), 5)
+                        self.assertEqual(len(choices) % 2, 1)
+                        self.assertIn(f"[{name}]", tokens)
+                        self.assertLessEqual(cell_len(row.plain), width)
+                        all_choices = list(_RULE_EDITOR_COLORS)
+                        if name not in all_choices:
+                            all_choices.insert(1, name)
+                        selected = all_choices.index(name)
+                        start = max(
+                            0, min(selected - len(choices) // 2, len(all_choices) - len(choices))
+                        )
+                        self.assertEqual(choices, all_choices[start:start + len(choices)])
+                        if width == 160:
+                            self.assertEqual(len(choices), 5)
+                        self.assertEqual(
+                            cell_len(row.plain),
+                            len(f"  {field}: ") + 4
+                            + len(choices) * (max(cell_len(name) for name in all_choices) + 2),
+                        )
 
-    def test_editor_pattern_column_displays_forty_characters(self):
+    def test_editor_color_caption_is_cyan_only_when_focused(self):
+        console = Console(file=io.StringIO(), width=100, height=24)
+        cyan = Style.parse("cyan").color
+        for field in ("Foreground", "Background"):
+            for active in (False, True):
+                with self.subTest(field=field, active=active):
+                    state = _RuleEditorState(
+                        "x", "red on blue", None, None,
+                        field=_RULE_EDITOR_FIELDS.index(field) if active else 0,
+                    )
+                    row = _render_editor_color_row(console, state, field)
+                    self.assertEqual(row.plain.startswith(">"), active)
+                    for offset in range(2, 2 + len(field) + 1):
+                        self.assertEqual(
+                            row.get_style_at_offset(console, offset).color,
+                            cyan if active else None,
+                        )
+
+    def test_editor_attributes_highlight_only_the_focused_toggle(self):
+        console = Console(file=io.StringIO(), width=100, height=24)
+        names = ("Bold", "Underline", "Italic", "Inverse")
+        for active in (False, True):
+            for attribute in range(len(names)):
+                with self.subTest(active=active, attribute=attribute):
+                    state = _RuleEditorState(
+                        "x", "bold underline italic reverse red", None, None,
+                        field=_RULE_EDITOR_FIELDS.index("Attributes") if active else 0,
+                        attribute=attribute,
+                    )
+                    row = _render_editor_attributes(state)
+                    for index, name in enumerate(names):
+                        token = f"[x] {name}"
+                        start = row.plain.index(token)
+                        for offset in range(start, start + len(token)):
+                            self.assertEqual(
+                                row.get_style_at_offset(console, offset).color,
+                                Style.parse("cyan").color if active and index == attribute else None,
+                            )
+
+    def test_editor_preview_is_separated_and_has_no_focus_marker(self):
+        for height in (8, 12, 24):
+            for field in ("Pattern", "Sample"):
+                for editing in (False, True):
+                    with self.subTest(height=height, field=field, editing=editing):
+                        output = io.StringIO()
+                        console = Console(file=output, width=100, height=height)
+                        state = _RuleEditorState(
+                            "x", "red", None, None,
+                            field=_RULE_EDITOR_FIELDS.index(field), editing=editing,
+                            text="x", cursor=1, preview_text="x",
+                        )
+                        view = _render_rule_editor(console, state)
+                        rows = [item for item in view.renderables if isinstance(item, Text)]
+                        preview_index = next(
+                            index for index, row in enumerate(rows) if "Preview:" in row.plain
+                        )
+                        self.assertTrue(rows[preview_index].plain.startswith("  Preview:"))
+                        self.assertEqual(rows[preview_index - 1].plain, "")
+                        selected = [row for row in rows if row.plain.startswith(">")]
+                        self.assertEqual(len(selected), 1)
+                        self.assertTrue(selected[0].plain.lstrip("> ").startswith(f"{field}:"))
+                        if height >= 12:
+                            self.assertTrue(
+                                rows[preview_index - 2].plain.lstrip("> ").startswith("Sample:")
+                            )
+                        console.print(view)
+                        self.assertLessEqual(len(output.getvalue().splitlines()), height)
+
+    def test_editor_table_has_fixed_columns_and_pattern_selection_marker(self):
+        output = io.StringIO()
+        console = Console(file=output, width=100, height=24, color_system=None)
+        console.print(_render_rule_editor(
+            console, _RuleEditorState("x", "red on blue", None, None, field=1)
+        ))
+        lines = output.getvalue().splitlines()
+        foreground = next(line for line in lines if line.lstrip().startswith("> Foreground:"))
+        background = next(line for line in lines if line.lstrip().startswith("Background:"))
+        self.assertIn("[red]", foreground)
+        self.assertIn("[blue]", background)
+        self.assertGreaterEqual(len(foreground.split()), 4)
+        self.assertGreaterEqual(len(background.split()), 4)
+        self.assertTrue(lines[1].startswith("  Pattern:"))
+
+    def test_editor_pattern_row_displays_forty_characters(self):
         pattern = "abcdefghijklmnopqrstuvwxyz0123456789ABCD"
         output = io.StringIO()
         console = Console(file=output, width=100, height=24, color_system=None)
-        table = _render_rule_editor(console, _RuleEditorState(pattern, "red", None, None)).renderables[0]
-        console.print(table)
+        console.print(_render_rule_editor(console, _RuleEditorState(pattern, "red", None, None)))
         self.assertIn(pattern, output.getvalue())
 
     def test_editor_narrow_terminal_keeps_pattern_cursor_and_color_headers_visible(self):
@@ -927,16 +1387,13 @@ class RuleManagementTests(unittest.TestCase):
                         pattern, "red on blue", None, rule,
                         editing=True, text=pattern, cursor=cursor,
                     )
-                    table = _render_rule_editor(console, state).renderables[0]
-                    console.print(table)
+                    console.print(_render_rule_editor(console, state))
                     lines = output.getvalue().splitlines()
                     self.assertIn("Edit rule", lines[0])
-                    self.assertIn("Foreground", lines[1])
-                    self.assertIn("Background", lines[1])
-                    pattern_width = table.columns[0].width
-                    self.assertEqual(pattern_width, {42: 22, 60: 40, 80: 55}[width])
+                    self.assertIn("Foreground", output.getvalue())
+                    self.assertIn("Background", output.getvalue())
                     selected = next(line for line in lines if line.startswith(">"))
-                    self.assertIn("|", selected[:pattern_width])
+                    self.assertIn("|", selected)
                     self.assertLessEqual(max(map(cell_len, lines)), width)
 
     def test_add_and_edit_render_the_same_form(self):
@@ -975,12 +1432,15 @@ class RuleManagementTests(unittest.TestCase):
 
         with patch("ctail.cli._render_rule_editor", side_effect=capture):
             message, _ = self.run_editor(
-                rules, ["right", "b", "right", "i", "right", "enter", "up", "save"],
+                rules, [
+                    "down", "down", "down", "down", " ", "right", "right",
+                    "right", " ", "save",
+                ],
                 rule=rule,
             )
         self.assertEqual(message, "Edited rule.")
-        self.assertEqual(fields[:6], [
-            "Pattern", "Foreground", "Foreground", "Background", "Background", "Mode",
+        self.assertEqual(fields[:5], [
+            "Pattern", "Mode", "Foreground", "Background", "Attributes",
         ])
         style = _editor_style(next(rule for rule in rules if rule.pattern == "x").color)
         self.assertTrue(style.bold)
@@ -993,22 +1453,17 @@ class RuleManagementTests(unittest.TestCase):
         console.print(_render_rule_editor(console, state))
         lines = output.getvalue().splitlines()
         self.assertIn("Add rule", lines[0])
-        self.assertEqual(lines[1].split(), ["Pattern", "Foreground", "Background"])
-        self.assertEqual(len(lines[2:7]), 5)
-        self.assertIn("aaaaaaa", lines[4])
-        self.assertIn(">yellow", lines[4])
-        self.assertEqual(
-            lines[7:],
-            [
-                " Mode: literal", " Style: yellow", " Name: ", " Sample: ",
-                "Preview: aaaaaaa", "",
-                "Ctrl+Enter/Ctrl+S: save rule (any field)",
-                "Arrows: fields/colors; Pattern Down: mode; Mode Enter: toggle; Up: colors",
-                "Mode Down: Style; Style Down: Name; Enter: edit text; Up: previous field",
-                "Name Down: Sample; Enter: edit saved sample; blank uses pattern",
-                "Foreground b: bold; Background i: inverse; Esc: discard",
-            ],
-        )
+        self.assertIn("aaaaaaa", lines[1])
+        labels = [
+            next(index for index, line in enumerate(lines) if label in line)
+            for label in (
+                "Pattern:", "Mode:", "Foreground:", "Background:", "Attributes:",
+                "Style:", "Name:", "Sample:", "Preview:",
+            )
+        ]
+        self.assertEqual(labels, sorted(labels))
+        self.assertIn("Ctrl+Enter/Ctrl+S", output.getvalue())
+        self.assertIn("Space/Enter toggles", output.getvalue())
 
     def test_editor_short_terminal_reduces_color_rows_and_keeps_notice(self):
         output = io.StringIO()
@@ -1027,8 +1482,158 @@ class RuleManagementTests(unittest.TestCase):
         state = _RuleEditorState("x", "yellow", "eventsd", None, editing=True, text="x", cursor=1)
         console.print(_render_rule_editor(console, state))
         lines = output.getvalue().splitlines()
-        self.assertIn("Editing pattern: Left/Right move; Backspace deletes", lines)
-        self.assertIn("Enter: accept text; Esc: discard text", lines)
+        self.assertIn("Editing: Left/Right move; Backspace deletes", lines)
+        self.assertIn("Enter: accept; Esc: discard text edit", lines)
+
+    def test_editor_style_field_colors_each_item(self):
+        for color, tokens in (
+            ("red", ("red",)),
+            (
+                "red, yellow, aquamarine1, blue_violet, bright_red, green, chartreuse1",
+                ("red", "yellow", "aquamarine1", "blue_violet", "bright_red", "green", "chartreuse1"),
+            ),
+            (
+                " bold red on blue , rgb(10,20,30), none, invalid_style, , underline green",
+                ("bold red on blue", "rgb(10,20,30)", "none", "invalid_style", "underline green"),
+            ),
+        ):
+            for active, editing in ((False, False), (True, False), (True, True)):
+                with self.subTest(color=color, active=active, editing=editing):
+                    state = _RuleEditorState(
+                        "x", "cyan" if editing else color, None, None,
+                        field=_RULE_EDITOR_FIELDS.index("Style" if active else "Pattern"),
+                        editing=editing, text=color, cursor=len(color),
+                    )
+                    view = _render_rule_editor(self.console, state)
+                    row = next(
+                        item for item in view.renderables
+                        if isinstance(item, Text) and item.plain[1:].startswith(" Style:")
+                    )
+                    self.assertEqual(row.plain[9:], color + ("|" if active else ""))
+                    offset = 9
+                    for token in tokens:
+                        offset = row.plain.index(token, offset)
+                        expected = Style(bold=True) + (_editor_style(token) or Style())
+                        for index in range(offset, offset + len(token)):
+                            self.assertEqual(
+                                row.get_style_at_offset(self.console, index), expected
+                            )
+                        offset += len(token)
+                    for index, character in enumerate(row.plain[9:], 9):
+                        if character == "," and "rgb" not in color:
+                            self.assertEqual(
+                                row.get_style_at_offset(self.console, index), Style(bold=True)
+                            )
+
+    def test_editor_style_field_cursor_preserves_item_style(self):
+        state = _RuleEditorState(
+            "x", "red, blue", None, None,
+            field=_RULE_EDITOR_FIELDS.index("Style"), editing=True,
+            text="red, blue", cursor=7,
+        )
+        view = _render_rule_editor(self.console, state)
+        row = next(
+            item for item in view.renderables
+            if isinstance(item, Text) and item.plain.startswith("> Style:")
+        )
+        self.assertEqual(row.plain, "> Style: red, bl|ue")
+        for token in ("bl", "ue"):
+            start = row.plain.index(token)
+            for index in range(start, start + len(token)):
+                self.assertEqual(
+                    row.get_style_at_offset(self.console, index),
+                    Style.parse("bold blue"),
+                )
+        self.assertEqual(
+            row.get_style_at_offset(self.console, row.plain.index("|")),
+            Style(bold=True),
+        )
+
+    def test_editor_style_field_preserves_colors_when_scrolling(self):
+        console = Console(file=io.StringIO(), width=30, height=24)
+        color = "red, bold yellow on blue, chartreuse1"
+        for editing in (False, True):
+            with self.subTest(editing=editing):
+                state = _RuleEditorState(
+                    "x", color, None, None,
+                    field=_RULE_EDITOR_FIELDS.index("Style"), editing=editing,
+                    text=color, cursor=len(color),
+                )
+                view = _render_rule_editor(console, state)
+                row = next(
+                    item for item in view.renderables
+                    if isinstance(item, Text) and item.plain.startswith("> Style:")
+                )
+                self.assertIn("<", row.plain)
+                offset = row.plain.index("chartreuse1")
+                for index in range(offset, offset + len("chartreuse1")):
+                    self.assertEqual(
+                        row.get_style_at_offset(console, index),
+                        Style.parse("bold chartreuse1"),
+                    )
+                for marker in ("<", "|"):
+                    self.assertEqual(
+                        row.get_style_at_offset(console, row.plain.index(marker)),
+                        Style(bold=True),
+                    )
+
+    def test_editor_mode_is_not_inverted_when_focused_or_editing(self):
+        for editing in (False, True):
+            with self.subTest(editing=editing):
+                state = _RuleEditorState(
+                    "x", "red", None, None,
+                    field=_RULE_EDITOR_FIELDS.index("Mode"), editing=editing,
+                )
+                view = _render_rule_editor(self.console, state)
+                mode = next(
+                    item for item in view.renderables
+                    if isinstance(item, Text) and item.plain.startswith("> Mode:")
+                )
+                self.assertTrue(mode.plain.startswith("> Mode: [Literal]"))
+                for offset in range(len(mode)):
+                    self.assertFalse(mode.get_style_at_offset(self.console, offset).reverse)
+
+    def test_editor_colors_only_the_caption_of_the_field_being_edited(self):
+        labels = ("Pattern", "Mode", "Style", "Name", "Sample")
+        for height in (8, 24):
+            for field in labels:
+                for editing in (False, True):
+                    with self.subTest(height=height, field=field, editing=editing):
+                        console = Console(file=io.StringIO(), width=100, height=height)
+                        state = _RuleEditorState(
+                            "x", "red", None, None,
+                            field=_RULE_EDITOR_FIELDS.index(field), editing=editing,
+                            text="x", cursor=1, name="example", preview_text="x",
+                        )
+                        view = _render_rule_editor(console, state)
+                        rows = [item for item in view.renderables if isinstance(item, Text)]
+                        for label in labels:
+                            matching_rows = [
+                                item for item in rows
+                                if item.plain.lstrip().lstrip(">").lstrip().startswith(
+                                    f"{label}:"
+                                )
+                            ]
+                            if not matching_rows:
+                                self.assertEqual(height, 8)
+                                self.assertNotEqual(field, label)
+                                continue
+                            caption = matching_rows[0]
+                            start = 2
+                            expected = (
+                                Style.parse("cyan").color
+                                if editing and field == label else None
+                            )
+                            for offset in range(start, start + len(label)):
+                                self.assertEqual(
+                                    caption.get_style_at_offset(console, offset).color, expected
+                                )
+                            for offset in range(start + len(label) + 1, len(caption)):
+                                self.assertIsNone(
+                                    caption.get_style_at_offset(console, offset).color
+                                )
+                        lines = console.render_lines(view, pad=False)
+                        self.assertLessEqual(len(lines), height)
 
     def test_editor_uses_compact_layout_for_very_short_terminal(self):
         output = io.StringIO()
@@ -1036,20 +1641,21 @@ class RuleManagementTests(unittest.TestCase):
         state = _RuleEditorState("x", "yellow", "eventsd", None, field=3)
         state.message = "Could not save rule"
         view = _render_rule_editor(console, state)
-        self.assertEqual(view.renderables[0].row_count, 1)
+        self.assertIsInstance(view.renderables[0], Text)
+        self.assertTrue(view.renderables[0].plain.startswith("Add rule"))
         console.print(view)
         lines = output.getvalue().splitlines()
         self.assertLessEqual(len(lines), 8)
-        self.assertIn("Mode: literal", output.getvalue())
+        self.assertIn("Mode: [Literal]", output.getvalue())
         self.assertIn("Style: yellow", output.getvalue())
-        self.assertIn("Preview: x", output.getvalue())
+        self.assertNotIn("Preview: x", output.getvalue())
         self.assertIn("Could not save rule", lines)
 
     def test_dialog_adds_manual_style_and_name(self):
         rules = self.load_rules()
         color = "italic #123456 on blue"
         message, _ = self.run_editor(rules, [
-            "x", "down", "down", "enter", *["backspace"] * 4,
+            "x", *["down"] * 5, "enter", *["backspace"] * 4,
             *color, "enter", "down", "enter", *"Request [id]", "enter",
             "right", "save",
         ])
@@ -1172,7 +1778,7 @@ class RuleManagementTests(unittest.TestCase):
                 sample = "before x after"
                 message, live = self.run_editor(
                     rules, ([] if editing else list(pattern))
-                    + ["down"] * 4 + ["enter"] + ["backspace"] * len(pattern)
+                    + ["down"] * 8 + ["enter"] + ["backspace"] * len(pattern)
                     + list(sample) + ["enter", "enter", "!", "cancel", "save"],
                     rule=rules[0] if editing else None,
                 )
@@ -1189,7 +1795,7 @@ class RuleManagementTests(unittest.TestCase):
                     item
                     for call in live.update.call_args_list
                     for item in call.args[0].renderables
-                    if isinstance(item, Text) and item.plain.startswith(">Preview:")
+                    if isinstance(item, Text) and item.plain.startswith("  Preview:")
                 ]
                 self.assertTrue(any(sample + "|" in item.plain for item in preview_frames))
                 self.assertIn(sample + "|", preview_frames[-1].plain)
@@ -1203,23 +1809,23 @@ class RuleManagementTests(unittest.TestCase):
         rules = self.load_rules()
         replacement = "prefix x suffix"
         message, live = self.run_editor(
-            rules, ["down"] * 4 + ["enter"] + ["backspace"] * len(sample)
+            rules, ["down"] * 8 + ["enter"] + ["backspace"] * len(sample)
             + list(replacement) + ["save"], rule=rules[0],
         )
         self.assertEqual(message, "Edited rule.")
         self.assertEqual(rules[0].sample, replacement)
         initial_preview = live.update.call_args_list[0].args[0]
         self.assertTrue(any(
-            isinstance(item, Text) and item.plain == f" Sample: {sample}"
+            isinstance(item, Text) and item.plain == f"  Sample: {sample}"
             for item in initial_preview.renderables
         ))
         self.assertTrue(any(
-            isinstance(item, Text) and item.plain == f"Preview: {sample}"
+            isinstance(item, Text) and item.plain == f"  Preview: {sample}"
             for item in initial_preview.renderables
         ))
 
         message, _ = self.run_editor(
-            rules, ["down"] * 4 + ["enter"] + ["backspace"] * len(replacement) + ["save"],
+            rules, ["down"] * 8 + ["enter"] + ["backspace"] * len(replacement) + ["save"],
             rule=rules[0],
         )
         self.assertEqual(message, "Edited rule.")
@@ -1240,7 +1846,7 @@ class RuleManagementTests(unittest.TestCase):
             view = _render_rule_editor(console, state)
             preview = next(
                 item for item in view.renderables
-                if isinstance(item, Text) and item.plain.startswith(">Preview:")
+                if isinstance(item, Text) and item.plain.startswith("  Preview:")
             )
             console.print(view)
             self.assertIn("|", preview.plain)
@@ -1259,7 +1865,7 @@ class RuleManagementTests(unittest.TestCase):
                 )
                 rules = self.load_rules()
                 message, _ = self.run_editor(
-                    rules, ([] if editing else ["x"]) + ["down"] * 4
+                    rules, ([] if editing else ["x"]) + ["down"] * 7
                     + ["enter", "backspace", *"[x].*", "save"],
                     rule=rules[0] if editing else None,
                 )
@@ -1273,13 +1879,12 @@ class RuleManagementTests(unittest.TestCase):
 
     def test_editor_save_shortcut_works_on_every_field_when_adding_or_editing(self):
         navigation = {
-            "Pattern": [], "Foreground": ["right"],
-            "Background": ["right", "right"], "Mode": ["down"],
-            "Style": ["down", "down"], "Name": ["down", "down", "down"],
-            "Sample": ["down"] * 4,
+            "Pattern": [], "Mode": ["down"], "Foreground": ["down"] * 2,
+            "Background": ["down"] * 3, "Attributes": ["down"] * 4,
+            "Style": ["down"] * 5, "Name": ["down"] * 6, "Sample": ["down"] * 7,
         }
         for editing in (False, True):
-            for field in _RULE_EDITOR_FIELDS:
+            for field in navigation:
                 with self.subTest(editing=editing, field=field):
                     self.config_path.write_text(
                         '[[rules]]\npattern="x"\ncolor="red"\nregex=false\n'
@@ -1295,13 +1900,12 @@ class RuleManagementTests(unittest.TestCase):
 
     def test_editor_plain_enter_never_saves_from_any_field(self):
         navigation = {
-            "Pattern": [], "Foreground": ["right"],
-            "Background": ["right", "right"], "Mode": ["down"],
-            "Style": ["down", "down"], "Name": ["down", "down", "down"],
-            "Sample": ["down"] * 4,
+            "Pattern": [], "Mode": ["down"], "Foreground": ["down"] * 2,
+            "Background": ["down"] * 3, "Attributes": ["down"] * 4,
+            "Style": ["down"] * 5, "Name": ["down"] * 6, "Sample": ["down"] * 7,
         }
         for editing in (False, True):
-            for field in _RULE_EDITOR_FIELDS:
+            for field in navigation:
                 with self.subTest(editing=editing, field=field):
                     self.config_path.write_text(
                         '[[rules]]\npattern="x"\ncolor="red"\nregex=false\n'
@@ -1332,7 +1936,7 @@ class RuleManagementTests(unittest.TestCase):
                         '[[rules]]\nname="Old"\npattern="x"\ncolor="red"\nregex=false\n'
                     )
                     rules = self.load_rules()
-                    steps = {"Pattern": [], "Style": ["down"] * 2, "Name": ["down"] * 3}[field]
+                    steps = {"Pattern": [], "Style": ["down"] * 5, "Name": ["down"] * 6}[field]
                     message, _ = self.run_editor(
                         rules, ([] if editing else ["x"]) + steps + ["enter"]
                         + ["backspace"] * (len(initial) if editing else {"Pattern": 1, "Style": 4, "Name": 0}[field])
@@ -1349,7 +1953,7 @@ class RuleManagementTests(unittest.TestCase):
         before = self.config_path.read_bytes()
         original_rules = list(rules)
         message, live = self.run_editor(rules, [
-            "down", "down", "enter", *["backspace"] * 3,
+            *["down"] * 5, "enter", *["backspace"] * 3,
             *"invalid-style", "save", "cancel", "cancel",
         ], rule=rules[0])
         self.assertEqual(message, "Canceled.")
@@ -1404,7 +2008,7 @@ class RuleManagementTests(unittest.TestCase):
                 rule = next(rule for rule in rules if rule.pattern == "(x)")
                 color = "italic red, bold rgb(1,2,3)"
                 message, _ = self.run_editor(rules, [
-                    "down", "down", "enter", *["backspace"] * 3,
+                    *["down"] * 6, "enter", *["backspace"] * 3,
                     *color, "enter", "down", "enter", *["backspace"] * 3,
                     *"Néw", "left", "!", "enter", "right", "save",
                 ], profile="one", rule=rule)
@@ -1426,7 +2030,7 @@ class RuleManagementTests(unittest.TestCase):
         self.config_path.write_text('[[rules]]\nname="Old"\npattern="x"\ncolor="red"\n')
         rules = self.load_rules()
         message, _ = self.run_editor(rules, [
-            "down", "down", "down", "enter", *["backspace"] * 3,
+            *["down"] * 6, "enter", *["backspace"] * 3,
             "enter", "right", "save",
         ], rule=rules[0])
         self.assertEqual(message, "Edited rule.")
@@ -1437,7 +2041,7 @@ class RuleManagementTests(unittest.TestCase):
         rules = self.load_rules()
         before = list(rules)
         message, live = self.run_editor(rules, [
-            "x", "down", "down", "enter", *["backspace"] * 4,
+            "x", *["down"] * 5, "enter", *["backspace"] * 4,
             *"badstyle", "enter", *["backspace"] * 8, *"red", "enter",
             "left", "save",
         ])
@@ -1454,8 +2058,8 @@ class RuleManagementTests(unittest.TestCase):
         rules = self.load_rules()
         before = self.config_path.read_bytes()
         message, _ = self.run_editor(rules, [
-            "down", "down", "enter", *" [", "cancel",
-            "down", "enter", *"New", "cancel", "right", "save",
+            *["down"] * 6, "enter", *" [", "cancel",
+            "up", "enter", *"New", "cancel", "save",
         ], rule=rules[0])
         self.assertEqual(message, "Edited rule.")
         self.assertEqual(self.config_path.read_bytes(), before)
@@ -1473,7 +2077,7 @@ class RuleManagementTests(unittest.TestCase):
                 console.print(_render_rule_editor(console, state))
                 lines = output.getvalue().splitlines()
                 self.assertLessEqual(len(lines), 8)
-                selected = next(line for line in lines if line.startswith(f">{label}:"))
+                selected = next(line for line in lines if line.startswith(f"> {label}:"))
                 self.assertIn("|", selected)
                 self.assertLessEqual(cell_len(selected), width)
 
@@ -1489,10 +2093,15 @@ class RuleManagementTests(unittest.TestCase):
         self.assertIn("default", _EDITOR_COLORS)
         state = _RuleEditorState("x", "red on blue", None, None, field=1)
         view = _render_rule_editor(Console(file=io.StringIO(), width=100, height=24), state)
-        self.assertEqual(view.renderables[0].row_count, 5)
+        self.assertIn("Foreground:", "\n".join(
+            item.plain for item in view.renderables if isinstance(item, Text)
+        ))
         rules = self.load_rules()
         message, _ = self.run_editor(
-            rules, ["enter", "x", "enter", "right", "down", "b", "right", "down", "i", "save"]
+            rules, [
+                "enter", "x", "enter", "down", "down", "down", "right", "down",
+                " ", "right", "right", "right", " ", "save",
+            ]
         )
         self.assertEqual(message, "Added rule.")
         style = _editor_style(rules[0].color)
@@ -2162,6 +2771,28 @@ class RuleManagementTests(unittest.TestCase):
                     )["rules"]
                     self.assertEqual(entries[0]["pattern"], "saved")
 
+    def test_pty_editor_group_target_changes_persist_and_apply_to_live_output(self):
+        self.config_path.write_text(
+            'show_unmatched=true\n[[rules]]\npattern="(x):(y)"\n'
+            'color="red, blue, yellow"\nsample="x:y"\n'
+        )
+        with self.running_app() as (master_fd, log_path):
+            os.write(master_fd, b"r")
+            self.read_until(master_fd, b"Rules manager")
+            os.write(master_fd, b"e")
+            self.read_until(master_fd, b"Style target:")
+            os.write(master_fd, b"\x1b[B\x1b[B\x1b[C")
+            self.read_until(master_fd, b"Group 2")
+            os.write(master_fd, b"\x1b[B\x1b[B\x1b[B \x1b[C \x13")
+            self.read_until(master_fd, b"Edited rule.")
+            self.assertEqual(self.load_rules()[0].color, "red, b u blue, yellow")
+            os.write(master_fd, b"\x1b")
+            self.read_until(master_fd, b"\x1b[?1049l")
+            with log_path.open("a") as log:
+                log.write("x:y group-test\n")
+            output = self.read_until(master_fd, b"group-test")
+            self.assertIn(b"\x1b[1;4;34my", output)
+
     def test_pty_builtin_rules_stay_active_but_are_hidden_from_manager(self):
         self.config_path.write_text("show_unmatched = false\n")
         with self.running_app() as (master_fd, log_path):
@@ -2252,7 +2883,7 @@ class RuleManagementTests(unittest.TestCase):
             self.read_until(master_fd, b"Add rule")
             os.write(
                 master_fd,
-                "café".encode() + b"\x1b[Cb\x1b[Ci\x13",
+                "café".encode() + b"\x1b[B" * 4 + b" \x1b[C" * 3 + b" \x13",
             )
             self.read_until(master_fd, b"Added rule.")
             data = tomllib.loads(self.rules_path.read_text())

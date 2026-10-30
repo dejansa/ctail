@@ -982,8 +982,10 @@ _RULE_EDITOR_COLORS = (*_BASIC_EDITOR_COLORS, *(
 _EDITOR_COLUMN_WIDTH = max(cell_len(name) for name in _EDITOR_COLORS) + 1
 _EDITOR_PATTERN_WIDTH = 55
 _RULE_EDITOR_FIELDS = (
-    "Pattern", "Foreground", "Background", "Mode", "Style", "Name", "Sample"
+    "Pattern", "Foreground", "Background", "Mode", "Style", "Name", "Sample", "Target",
+    "Attributes",
 )
+_EDITOR_ATTRIBUTES = ("Bold", "Underline", "Italic", "Inverse")
 _REGEX_METACHARACTERS = frozenset(r".^$*+?{}[]\|()")
 
 
@@ -997,24 +999,59 @@ class _RuleEditorState:
     rule: ColorRule | None
     field: int = 0
     editing: bool = False
+    editing_regex_enabled: bool = False
     text: str = ""
     cursor: int = 0
     message: str = ""
     regex_enabled: bool = False
     name: str = ""
     preview_text: str | None = None
+    target: int = 0
+    attribute: int = 0
+
+
+def _editor_regex(state: _RuleEditorState) -> re.Pattern[str] | None:
+    """Find capture targets without interrupting incomplete pattern edits."""
+    if not state.regex_enabled:
+        return None
+    try:
+        return re.compile(state.pattern)
+    except re.error:
+        return None
+
+
+def _editor_target_color(state: _RuleEditorState) -> str:
+    compiled = _editor_regex(state)
+    if compiled is None or not compiled.groups:
+        return state.color
+    state.target = min(state.target, compiled.groups)
+    colors = _split_colors(state.color)
+    return colors[state.target] if state.target < len(colors) else "none"
+
+
+def _editor_target_label(state: _RuleEditorState, compiled: re.Pattern[str]) -> str:
+    if state.target == compiled.groups:
+        return "Rest of match (base style; groups inherit unset properties)"
+    name = next(
+        (name for name, index in compiled.groupindex.items() if index == state.target + 1),
+        None,
+    )
+    label = f"Group {state.target + 1}" + (f" ({name})" if name else "")
+    match = compiled.search(state.preview_text or state.pattern)
+    if match is not None:
+        value = match.group(state.target + 1)
+        label += f": {value!r}" if value else " (not matched or empty)"
+    return label
 
 
 def _editor_style(color: str) -> Style | None:
-    """Parse a single simple style, returning ``None`` for unsupported styles."""
+    """Parse a single style, returning ``None`` for invalid or multiple styles."""
     if len(_split_colors(color)) != 1:
         return None
     try:
-        style = Style.parse(color)
+        return Style.parse(color)
     except (ColorParseError, StyleSyntaxError):
         return None
-    simple = Style(color=style.color, bgcolor=style.bgcolor, bold=style.bold, reverse=style.reverse)
-    return style if style == simple else None
 
 
 def _editor_color_choices(color: str | None) -> list[str]:
@@ -1027,13 +1064,15 @@ def _editor_color_choices(color: str | None) -> list[str]:
 
 def _editor_change_style(state: _RuleEditorState, field: str, step: int) -> None:
     """Move a style component through its available values."""
-    style = _editor_style(state.color)
+    style = _editor_style(_editor_target_color(state))
     if style is None:
         state.message = "Complex style: color controls are unavailable."
         return
     foreground = style.color.name if style.color else None
     background = style.bgcolor.name if style.bgcolor else None
-    bold, reverse = style.bold, style.reverse
+    bold, underline, italic, reverse = (
+        style.bold, style.underline, style.italic, style.reverse
+    )
     if field in ("Foreground", "Background"):
         current = foreground if field == "Foreground" else background
         choices = _editor_color_choices(current)
@@ -1045,9 +1084,58 @@ def _editor_change_style(state: _RuleEditorState, field: str, step: int) -> None
             background = None if name == "none" else name
     elif field == "Bold":
         bold = None if bold else True
+    elif field == "Underline":
+        underline = None if underline else True
+    elif field == "Italic":
+        italic = None if italic else True
     else:
         reverse = None if reverse else True
-    state.color = str(Style(color=foreground, bgcolor=background, bold=bold, reverse=reverse))
+    color = str(Style(
+        color=foreground,
+        bgcolor=background,
+        bold=bold,
+        dim=style.dim,
+        italic=italic,
+        underline=underline,
+        blink=style.blink,
+        blink2=style.blink2,
+        reverse=reverse,
+        conceal=style.conceal,
+        strike=style.strike,
+        underline2=style.underline2,
+        frame=style.frame,
+        encircle=style.encircle,
+        overline=style.overline,
+        link=style.link,
+        meta=style.meta,
+    ))
+    definition, separator, link = color.partition(" link ")
+    color = " ".join(
+        {"bold": "b", "underline": "u"}.get(token, token) for token in definition.split()
+    ) + separator + link
+    compiled = _editor_regex(state)
+    if compiled is not None and compiled.groups:
+        colors = list(_split_colors(state.color))
+        colors.extend(["none"] * max(0, state.target + 1 - len(colors)))
+        colors[state.target] = color
+        state.color = ", ".join(colors)
+    else:
+        state.color = color
+
+
+def _editor_navigation_fields(state: _RuleEditorState) -> list[int]:
+    """Return field indexes in the order they should be visited."""
+    compiled = _editor_regex(state)
+    if compiled is not None and compiled.groups:
+        return [5, 0, 3, 7, 1, 2, 8, 6, 4]
+    return [5, 0, 3, 1, 2, 8, 6, 4]
+
+
+def _editor_move_field(state: _RuleEditorState, step: int) -> None:
+    """Move vertically to the next visible editor field."""
+    fields = _editor_navigation_fields(state)
+    position = fields.index(state.field) if state.field in fields else 0
+    state.field = fields[max(0, min(len(fields) - 1, position + step))]
 
 
 def _editor_text_window(text: str, cursor: int, width: int) -> str:
@@ -1088,88 +1176,107 @@ def _render_editor_preview(state: _RuleEditorState) -> Text:
     return rendered
 
 
-def _render_editor_table(console: Console, state: _RuleEditorState, *, rows: int = 5) -> Table:
-    """Build the table showing the pattern and selectable foreground/background."""
-    field = _RULE_EDITOR_FIELDS[state.field]
-    style = _editor_style(state.color)
-    foreground = style.color.name if style and style.color else "none"
-    background = style.bgcolor.name if style and style.bgcolor else "none"
-    table = Table(
-        title=("Edit rule" if state.rule else "Add rule") if rows > 1 else None,
-        show_header=rows > 1,
-        box=None,
-        padding=(0, 0),
-    )
-    available_width = max(3, console.width)
-    min_color_width = min(10, max(1, (available_width - min(22, available_width // 2)) // 2))
-    pattern_column_width = min(_EDITOR_PATTERN_WIDTH, available_width - 2 * min_color_width)
-    color_width = min(_EDITOR_COLUMN_WIDTH, (available_width - pattern_column_width) // 2)
-    pattern_width = pattern_column_width - 1
-    for heading, width in (
-        ("Pattern", pattern_column_width),
-        ("Foreground", color_width),
-        ("Background", color_width),
-    ):
-        table.add_column(heading, width=width, overflow="ellipsis", no_wrap=True)
-    height = rows
-    center = height // 2
-    fg_choices = _editor_color_choices(None if foreground == "none" else foreground)
-    bg_choices = _editor_color_choices(None if background == "none" else background)
-    fg_index, bg_index = fg_choices.index(foreground), bg_choices.index(background)
-    for row in range(height):
-        offset = row - center
-        cells = []
-        pattern = state.pattern
-        if state.editing and field == "Pattern":
-            pattern = _editor_text_window(state.text, state.cursor, pattern_width)
-        elif field == "Pattern":
-            pattern = _editor_text_window(state.pattern, len(state.pattern), pattern_width)
-        cell = Text(">" if field == "Pattern" and offset == 0 else " ", style="bold")
-        cell.append(pattern if offset == 0 else "")
-        cells.append(cell)
-        for choices, index, active, is_background in (
-            (fg_choices, fg_index, field == "Foreground", False),
-            (bg_choices, bg_index, field == "Background", True),
-        ):
-            start = max(0, min(index - center, len(choices) - height))
-            position = start + row
-            name = choices[position] if 0 <= position < len(choices) else ""
-            selected = position == index
-            cell = Text(">" if active and selected else " ", style="bold")
-            sample_style = None
-            if name and name != "none":
+def _render_editor_color_row(console: Console, state: _RuleEditorState, field: str) -> Text:
+    """Render a horizontally browsable color row with several visible choices."""
+    style = _editor_style(_editor_target_color(state))
+    is_background = field == "Background"
+    if style is None:
+        selected_color = "none"
+    elif is_background:
+        selected_color = style.bgcolor.name if style.bgcolor else "none"
+    else:
+        selected_color = style.color.name if style.color else "none"
+    choices = _editor_color_choices(None if selected_color == "none" else selected_color)
+    selected = choices.index(selected_color)
+    active = _RULE_EDITOR_FIELDS[state.field] == field
+    prefix = Text(">" if active else " ", style="bold")
+    prefix.append(f" {field}:", style="cyan" if active else None)
+    prefix.append(" ")
+    if style is None:
+        prefix.append("unavailable", style="dim")
+        return prefix
+
+    available = max(1, console.width - cell_len(prefix.plain))
+    name_width = max(cell_len(name) for name in choices)
+
+    def window_width(start_index: int, end_index: int) -> int:
+        """Measure the swatches and scroll markers for a proposed window."""
+        return (name_width + 2) * (end_index - start_index) + 4
+
+    count = min(5, len(choices))
+    while True:
+        start = max(0, min(selected - count // 2, len(choices) - count))
+        end = start + count
+        if count == 1 or window_width(start, end) <= available:
+            break
+        count -= 2
+    row = prefix
+    row.append("‹ " if start else "  ", style="dim")
+    for position in range(start, end):
+        name = choices[position]
+        token = f"[{name}]" if position == selected else f" {name} "
+        token += " " * (name_width - cell_len(name))
+        swatch_style = None
+        if name != "none":
+            try:
                 if is_background:
                     red, green, blue = Color.parse(name).get_truecolor(foreground=False)
-                    contrast = "black" if red * 299 + green * 587 + blue * 114 >= 128000 else "white"
-                    sample_style = f"{contrast} on {name}"
-                elif name != "default":
-                    red, green, blue = Color.parse(name).get_truecolor()
-                    contrast = "black" if red * 299 + green * 587 + blue * 114 >= 128000 else "white"
-                    sample_style = f"{name} on {contrast}"
+                    contrast = (
+                        "black"
+                        if red * 299 + green * 587 + blue * 114 >= 128000
+                        else "white"
+                    )
+                    swatch_style = f"{contrast} on {name}"
                 else:
-                    sample_style = name
-            cell.append(name, style=sample_style)
-            cells.append(cell)
-        table.add_row(*cells)
-    return table
+                    swatch_style = name
+            except ColorParseError:
+                swatch_style = None
+        row.append(token, style=swatch_style)
+        if position == selected:
+            row.stylize("bold", len(row) - len(token), len(row))
+    row.append(" ›" if end < len(choices) else "  ", style="dim")
+    row.no_wrap = True
+    return row
+
+
+def _render_editor_attributes(state: _RuleEditorState) -> Text:
+    """Render the visible on/off style attribute toggles."""
+    style = _editor_style(_editor_target_color(state))
+    active = _RULE_EDITOR_FIELDS[state.field] == "Attributes"
+    row = Text(">" if active else " ", style="bold")
+    row.append(" Attributes:", style="cyan" if active else None)
+    row.append(" ")
+    if style is None:
+        row.append("unavailable", style="dim")
+        return row
+    enabled = (style.bold, style.underline, style.italic, style.reverse)
+    for index, (name, value) in enumerate(zip(_EDITOR_ATTRIBUTES, enabled, strict=True)):
+        if index:
+            row.append("  ")
+        token = f"[{'x' if value else ' '}] {name}"
+        row.append(token, style="bold cyan" if active and index == state.attribute else None)
+    row.no_wrap = True
+    return row
 
 
 def _fit_editor_view(
-    console: Console, state: _RuleEditorState,
-    controls: list[Text], mode: Text, style: Text, preview: Text,
+    console: Console, state: _RuleEditorState, rows: list[Text],
     instructions: tuple[str, ...], message: str,
 ) -> Group:
     """Fit the rule editor contents to the available terminal height."""
-    rows = 5
-    show_table = True
     help_lines = list(instructions)
+    visible_rows = list(rows)
 
     def render() -> Group:
         """Build the current editor view from its visible components."""
-        table = _render_editor_table(console, state, rows=rows)
+        content = []
+        for row in visible_rows:
+            if row.plain.lstrip().startswith("Preview:"):
+                content.append(Text(""))
+            content.append(row)
         return Group(
-            *([table] if show_table else []), mode, style, *controls, preview,
-            *([Text("")] if console.size.height >= 12 else []),
+            *content,
+            *([Text("")] if help_lines and console.size.height >= 12 else []),
             *(Text(line, style="dim") for line in help_lines),
             *([Text(message, style="yellow")] if message else []),
         )
@@ -1178,78 +1285,185 @@ def _fit_editor_view(
         """Report whether a rendered view fits in the terminal."""
         return len(console.render_lines(view, options=console.options, pad=False)) <= console.size.height
 
+    def row_text(row: Text) -> str:
+        """Return a row's label without its selection marker."""
+        return row.plain.lstrip().lstrip(">").lstrip()
+
     view = render()
-    while rows > 1 and not fits(view):
-        rows -= 1
-        view = render()
     while help_lines and not fits(view):
         help_lines.pop()
         view = render()
-    if message and not fits(view):
-        show_table = False
+    if not fits(view):
+        visible_rows = [
+            row for row in visible_rows if (
+                not row_text(row).startswith(("Name:", "Sample:"))
+                or row_text(row).startswith(f"{_RULE_EDITOR_FIELDS[state.field]}:")
+                or (
+                    console.size.height <= 8
+                    and row_text(row).startswith("Sample:")
+                    and bool(state.preview_text)
+                )
+            )
+        ]
+        view = render()
+    if not fits(view) and console.size.height <= 8:
+        active = _RULE_EDITOR_FIELDS[state.field]
+        visible_labels = {"Mode", "Style", "Sample", active}
+        compact_rows = []
+        for row in visible_rows:
+            normalized = row_text(row)
+            keep_target = active == "Target" and normalized.startswith("Style target:")
+            keep_preview = (
+                (active in ("Target", "Sample") or bool(state.preview_text))
+                and normalized.startswith("Preview:")
+            )
+            if (
+                normalized in ("Add rule", "Edit rule")
+                or any(normalized.startswith(f"{label}:") for label in visible_labels)
+                or keep_target
+                or keep_preview
+            ):
+                compact_rows.append(row)
+        visible_rows = compact_rows
         view = render()
     return view
 
 
 def _render_rule_editor(console: Console, state: _RuleEditorState) -> Group:
     """Render the editor controls, style preview, and keyboard instructions."""
+    _editor_target_color(state)
     field = _RULE_EDITOR_FIELDS[state.field]
-    compact = console.size.height < 12
-    mode = Text(">" if field == "Mode" else " ", style="bold")
-    mode.append(f"Mode: {'regex' if state.regex_enabled else 'literal'}",
-                style="reverse" if field == "Mode" else None)
-    text_fields = []
-    sample_value = state.preview_text or ""
-    for label, value in (
-        ("Style", state.color), ("Name", state.name), ("Sample", sample_value)
-    ):
+    title = Text("Edit rule" if state.rule else "Add rule", style="bold")
+
+    def render_text_field(label: str, value: str) -> Text:
         active = field == label
+        text = state.text if active and state.editing else value
+        rendered = Text(text)
+        if label == "Style":
+            offset = 0
+            for item in _split_colors(text):
+                start = text.index(item, offset)
+                end = start + len(item)
+                style = _editor_style(item)
+                if style is not None:
+                    rendered.stylize(style, start, end)
+                offset = end + 1
         if active:
-            text = state.text if state.editing else value
             cursor = state.cursor if state.editing else len(value)
-            value = _editor_text_window(text, cursor, max(1, console.width - len(label) - 3))
+            rendered = _editor_text_view(
+                rendered, cursor, max(1, console.width - len(label) - 4)
+            )
         control = Text(">" if active else " ", style="bold")
-        control.append(f"{label}: {value}")
+        control.append(
+            f" {label}:", style="cyan" if active and state.editing else None
+        )
+        control.append(" ")
+        control.append(rendered)
         control.no_wrap = True
-        text_fields.append(control)
-    style, name, sample = text_fields
+        return control
+
+    name_row = render_text_field("Name", state.name)
+    pattern = state.text if state.editing and field == "Pattern" else state.pattern
+    pattern_cursor = state.cursor if state.editing and field == "Pattern" else len(pattern)
+    pattern = _editor_text_window(
+        pattern, pattern_cursor, max(1, min(_EDITOR_PATTERN_WIDTH, console.width - 11))
+    )
+    pattern_row = Text(">" if field == "Pattern" else " ", style="bold")
+    pattern_row.append(
+        " Pattern:", style="cyan" if state.editing and field == "Pattern" else None
+    )
+    pattern_row.append(" ")
+    pattern_row.append(pattern)
+    pattern_row.no_wrap = True
+
+    mode = Text(">" if field == "Mode" else " ", style="bold")
+    mode.append(" Mode:", style="cyan" if state.editing and field == "Mode" else None)
+    mode.append(" ")
+    mode.append(
+        "[Literal]" if not state.regex_enabled else " Literal ",
+        style="bold" if not state.regex_enabled else "dim",
+    )
+    mode.append(" ")
+    mode.append(
+        "[Regex]" if state.regex_enabled else " Regex ",
+        style="bold" if state.regex_enabled else "dim",
+    )
+    mode.no_wrap = True
+
+    compiled = _editor_regex(state)
+    rows = [title, name_row, pattern_row, mode]
+    if compiled is not None and compiled.groups:
+        target = Text(">" if field == "Target" else " ", style="bold")
+        target.append(f" Style target: < {_editor_target_label(state, compiled)} >")
+        target.no_wrap = True
+        rows.append(target)
+    rows.extend((
+        _render_editor_color_row(console, state, "Foreground"),
+        _render_editor_color_row(console, state, "Background"),
+        _render_editor_attributes(state),
+    ))
+    sample_value = state.preview_text or ""
+    rows.append(render_text_field("Sample", sample_value))
+    rows.append(render_text_field("Style", state.color))
     preview = _render_editor_preview(state)
+    if compiled is not None and compiled.groups and field in (
+        "Target", "Foreground", "Background", "Attributes"
+    ):
+        preview_sample = state.preview_text or state.pattern
+        for match in compiled.finditer(preview_sample):
+            spans = [
+                match.span(index) for index in range(1, compiled.groups + 1)
+                if match.start(index) >= 0
+            ]
+            if state.target < compiled.groups:
+                start, end = match.span(state.target + 1)
+                if start >= 0:
+                    preview.stylize("underline", start, end)
+            else:
+                cursor = match.start()
+                for start, end in sorted(spans):
+                    start, end = max(start, match.start()), min(end, match.end())
+                    if end <= start:
+                        continue
+                    if start > cursor:
+                        preview.stylize("underline", cursor, start)
+                    cursor = max(cursor, end)
+                if cursor < match.end():
+                    preview.stylize("underline", cursor, match.end())
     if field == "Sample":
         preview_sample = (
             state.text if state.editing else state.preview_text
         ) or state.pattern
         cursor = state.cursor if state.editing else len(preview_sample)
-        preview = _editor_text_view(preview, cursor, max(1, console.width - 10))
-    preview = Text(">Preview: " if field == "Sample" else "Preview: ") + preview
+        preview = _editor_text_view(preview, cursor, max(1, console.width - 12))
+    preview = Text("  Preview: ") + preview
     preview.no_wrap = True
-    if state.editing and compact:
+    rows.append(preview)
+    if state.editing and field == "Mode":
+        instructions = ("Match: Left/Right toggle literal/regex", "Enter: accept; Esc: discard")
+    elif state.editing and field in ("Pattern", "Style", "Name", "Sample"):
         instructions = (
             "Editing: Left/Right move; Backspace deletes",
-            "Enter: accept; Esc: discard text",
-        )
-    elif state.editing:
-        instructions = (
-            f"Editing {field.lower()}: Left/Right move; Backspace deletes",
-            "Enter: accept text; Esc: discard text",
-        )
-    elif compact:
-        instructions = (
-            "Down: mode/style/name/sample; Enter: edit/toggle",
-            "FG b:bold BG i:inverse; Esc: discard",
+            "Enter: accept; Esc: discard text edit",
         )
     else:
         instructions = (
-            "Arrows: fields/colors; Pattern Down: mode; Mode Enter: toggle; Up: colors",
-            "Mode Down: Style; Style Down: Name; Enter: edit text; Up: previous field",
-            "Name Down: Sample; Enter: edit saved sample; blank uses pattern",
-            "Foreground b: bold; Background i: inverse; Esc: discard",
+            "Up/Down: move fields; Left/Right: choose mode/color or attribute",
+            "Attributes: Left/Right focus; Space/Enter toggles; Style Enter: raw edit",
+            "Mode/Pattern/Name/Sample Enter: edit; Esc: discard changes",
         )
     instructions = ("Ctrl+Enter/Ctrl+S: save rule (any field)", *instructions)
-    if compact and state.message:
+    if compiled is not None and compiled.groups and not state.editing:
+        instructions = (
+            instructions[0],
+            "Mode Down: target; Left/Right: choose part; selected part underlined",
+            "Up/Down: move fields; Left/Right: choose color or attribute",
+            "Attributes Space/Enter toggles; Style Enter: advanced edit; Esc: discard",
+        )
+    if console.size.height < 12 and state.message:
         instructions = ()
     return _fit_editor_view(
-        console, state, controls=[name, sample], mode=mode, style=style,
-        preview=preview, instructions=instructions, message=state.message,
+        console, state, rows, instructions, state.message,
     )
 
 
@@ -1302,7 +1516,6 @@ def _rule_editor(
         name=(rule.name or "") if rule else "",
         preview_text=rule.sample if rule else None,
     )
-    original_mode = state.regex_enabled
     while True:
         live.update(_render_rule_editor(console, state), refresh=True)
         key = _read_rule_key(keyboard_fd)
@@ -1310,8 +1523,17 @@ def _rule_editor(
         save_requested = key == "save"
         if state.editing:
             if key == "cancel":
-                state.regex_enabled = original_mode
+                state.regex_enabled = state.editing_regex_enabled
                 state.editing = False
+                state.message = ""
+                continue
+            elif field == "Mode":
+                if key in ("left", "right"):
+                    state.regex_enabled = not state.regex_enabled
+                elif key in ("enter", "save"):
+                    state.editing = False
+                if not save_requested:
+                    continue
             elif key in ("enter", "save"):
                 if field == "Style":
                     try:
@@ -1371,31 +1593,53 @@ def _rule_editor(
                     state.message = "Built-in patterns cannot be changed."
                 else:
                     state.text, state.cursor = state.pattern, len(state.pattern)
-                    original_mode = state.regex_enabled
+                    state.editing_regex_enabled = state.regex_enabled
                     state.editing = True
+            elif key == "up":
+                _editor_move_field(state, -1)
             elif key == "down":
-                state.field = 3
-            elif key == "right":
-                state.field = 1
-        elif field in ("Foreground", "Background"):
-            if key in ("up", "down"):
-                _editor_change_style(state, field, -1 if key == "up" else 1)
-            elif key in ("left", "right"):
-                state.field = max(0, min(3, state.field + (-1 if key == "left" else 1)))
-            elif key == "b" and field == "Foreground":
-                _editor_change_style(state, "Bold", 1)
-            elif key == "i" and field == "Background":
-                _editor_change_style(state, "Inverse", 1)
+                _editor_move_field(state, 1)
         elif field == "Mode":
             if key in ("enter", "left", "right"):
                 if rule is not None and rule.source == "built-in":
                     state.message = "Built-in rules must use regex."
+                elif key == "enter":
+                    state.editing_regex_enabled = state.regex_enabled
+                    state.editing = True
                 else:
                     state.regex_enabled = not state.regex_enabled
             elif key == "up":
-                state.field = 1
+                _editor_move_field(state, -1)
             elif key == "down":
-                state.field = 4
+                _editor_move_field(state, 1)
+        elif field in ("Foreground", "Background"):
+            if key in ("left", "right"):
+                _editor_change_style(state, field, -1 if key == "left" else 1)
+            elif key == "up":
+                _editor_move_field(state, -1)
+            elif key == "down":
+                _editor_move_field(state, 1)
+        elif field == "Attributes":
+            if key in ("left", "right"):
+                state.attribute = max(
+                    0, min(len(_EDITOR_ATTRIBUTES) - 1, state.attribute + (-1 if key == "left" else 1))
+                )
+            elif key in ("enter", " "):
+                _editor_change_style(state, _EDITOR_ATTRIBUTES[state.attribute], 1)
+            elif key == "up":
+                _editor_move_field(state, -1)
+            elif key == "down":
+                _editor_move_field(state, 1)
+        elif field == "Target":
+            compiled = _editor_regex(state)
+            if compiled is not None and compiled.groups and key in ("left", "right"):
+                state.target = (state.target + (-1 if key == "left" else 1)) % (compiled.groups + 1)
+            elif key == "up":
+                _editor_move_field(state, -1)
+            elif key == "down":
+                _editor_move_field(state, 1)
+            elif key == "enter":
+                state.field = 1
         elif field in ("Style", "Name", "Sample"):
             if key == "enter":
                 if field == "Style":
@@ -1405,16 +1649,12 @@ def _rule_editor(
                 else:
                     state.text = state.preview_text or ""
                 state.cursor = len(state.text)
-                original_mode = state.regex_enabled
+                state.editing_regex_enabled = state.regex_enabled
                 state.editing = True
             elif key == "up":
-                state.field -= 1
+                _editor_move_field(state, -1)
             elif key == "down":
-                state.field = min(len(_RULE_EDITOR_FIELDS) - 1, state.field + 1)
-            elif key == "left":
-                state.field = 2 if field == "Style" else state.field - 1
-            elif key == "right":
-                state.field = 5 if field == "Style" else 1
+                _editor_move_field(state, 1)
 
 
 def _select_profile(
