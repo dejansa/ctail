@@ -21,9 +21,9 @@ cat application.log | ctail -l
 Use `ctail --version` (or `ctail -v`) to show the installed package version.
 The version is maintained in `pyproject.toml`.
 
-## Install from GitLab
+## Install from Github
 
-With SSH access to the GitLab repository and Python 3.14 or newer, install the
+With SSH access to the Github repository and Python 3.14 or newer, install the
 tool with either `uv` or `pipx`:
 
 ```sh
