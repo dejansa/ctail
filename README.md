@@ -9,6 +9,22 @@ ctail -f /var/log/myapp.log
 cat application.log | ctail
 ```
 
+To colorize a log being followed over SSH, pipe the remote `tail` output into
+`ctail`:
+
+```sh
+ssh user@host 'tail -F /var/log/myapp.log' | ctail
+```
+
+Because `ctail` receives piped input in this case, interactive file-following
+keys are unavailable, and coloring-rule profiles cannot be selected
+automatically from the remote file path. Specify the profile explicitly with
+`--profile NAME` when needed:
+
+```sh
+ssh user@host 'tail -F /var/log/myapp.log' | ctail --profile NAME
+```
+
 Use `-l` or `--less` to colorize a complete file and browse it with the system
 `less` pager instead of tailing it. Pager mode accepts file paths or piped input
 and requires `less` to be installed:
