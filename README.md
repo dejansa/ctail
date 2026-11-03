@@ -9,6 +9,14 @@ ctail -f /var/log/myapp.log
 cat application.log | ctail
 ```
 
+Use `-c` or `--colorize` to colorize stdin or one file directly, without
+tailing it:
+
+```sh
+cat application.log | ctail -c
+ctail -c application.log
+```
+
 To colorize a log being followed over SSH, pipe the remote `tail` output into
 `ctail`:
 

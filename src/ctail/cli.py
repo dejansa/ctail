@@ -2404,6 +2404,11 @@ def main() -> None:
         help="disable colored output",
     )
     parser.add_argument(
+        "-c", "--colorize",
+        action="store_true",
+        help="colorize stdin or one file without tailing",
+    )
+    parser.add_argument(
         "-p", "--profile",
         metavar="NAME",
         help="use a named coloring-rule profile",
@@ -2461,9 +2466,16 @@ def main() -> None:
         config = _read_toml(config_path) if config_path.exists() else {}
         configured_profiles = _parse_rule_profiles(config, config_path, allow_builtins=True)
         mappings = _parse_profile_paths(config, config_path, configured_profiles)
-        has_file_source = sys.stdin.isatty() and bool(tail_arguments)
-        source_file = None
-        if not options.show_rules and not options.version:
+        colorize_file = None
+        if options.colorize:
+            colorize_file = _single_file_argument(tail_arguments, less=True)
+            if tail_arguments and colorize_file is None:
+                raise ValueError("--colorize accepts at most one file path")
+        has_file_source = (
+            not options.colorize and sys.stdin.isatty() and bool(tail_arguments)
+        )
+        source_file = colorize_file
+        if not options.show_rules and not options.version and not options.colorize:
             if options.less:
                 source_file = _single_file_argument(tail_arguments, less=True)
             elif has_file_source:
@@ -2489,6 +2501,13 @@ def main() -> None:
             return
         if options.version:
             console.print(f"ctail version {version('ctail')}")
+            return
+        if options.colorize:
+            if source_file is None:
+                _colorize_stream(sys.stdin.buffer, console, rules, show_unmatched)
+            else:
+                with Path(source_file).open("rb") as source:
+                    _colorize_stream(source, console, rules, show_unmatched)
             return
         if options.show_profiles:
             if not sys.stdin.isatty() or not sys.stdout.isatty():
