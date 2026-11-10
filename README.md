@@ -99,10 +99,10 @@ To select a profile automatically for a file, add ordered path mappings to
 
 ```toml
 [[profile_paths]]
-profile = "asaklogs"
+profile = "myapplogs"
 paths = [
-    "~/.local/share/asak2/logs/",
-    "~/other-logs/asak-*.log",
+    "~/.local/share/myapp/logs/",
+    "~/other-logs/myapp-*.log",
 ]
 
 [[profile_paths]]
